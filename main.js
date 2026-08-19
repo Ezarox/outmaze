@@ -2062,9 +2062,12 @@ function updateVsChoiceStatus() {
 }
 
 const AI_ASYNC_YIELD_BUDGET = 1;
+const PUBLIC_VS_WS_URL = "wss://outmaze-73wvux7ama-ts.a.run.app";
 const VS_WS_URL =
   typeof location !== "undefined"
-    ? `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}`
+    ? location.protocol === "http:"
+      ? `ws://${location.host}`
+      : PUBLIC_VS_WS_URL
     : "";
 
 async function buildAiLayoutAsync() {

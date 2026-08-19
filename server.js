@@ -10,19 +10,29 @@ const GRID_SIZE = 21;
 const MAX_CELL_VALUE = 15;
 const ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const SPECIAL_TYPES = new Set(["radius", "row", "column", "gravity", "lightning"]);
+const DEFAULT_PUBLIC_SITE_URL = process.env.PUBLIC_SITE_URL || "https://ezarox.github.io/outmaze/";
 const PUBLIC_FILES = new Set(["index.html", "style.css", "ai-core.js", "ai-worker.js", "main.js"]);
 
 const MIME_TYPES = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".png": "image/png",
-  ".svg": "image/svg+xml",
-  ".webp": "image/webp"
+  ".js": "text/javascript; charset=utf-8"
 };
 
-function createStaticHandler(rootDirectory) {
+function normalizeOrigin(value) {
+  try {
+    return new URL(String(value || "")).origin;
+  } catch {
+    return "";
+  }
+}
+
+function parseAllowedOrigins(value) {
+  const candidates = Array.isArray(value) ? value : String(value || "").split(",");
+  return [...new Set(candidates.map(normalizeOrigin).filter(Boolean))];
+}
+
+function createHttpHandler({ publicSiteUrl = DEFAULT_PUBLIC_SITE_URL, rootDirectory = __dirname, serveStatic = false }) {
   const root = path.resolve(rootDirectory);
   return (req, res) => {
     const requestPath = new URL(req.url, `http://${req.headers.host || "localhost"}`).pathname;
@@ -34,32 +44,42 @@ function createStaticHandler(rootDirectory) {
       res.end('{"status":"ok"}');
       return;
     }
-    const relativePath = requestPath === "/" ? "index.html" : decodeURIComponent(requestPath.slice(1));
-    if (!PUBLIC_FILES.has(relativePath)) {
-      res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("Not found");
+    if (!serveStatic && requestPath === "/") {
+      res.writeHead(302, {
+        Location: publicSiteUrl,
+        "Cache-Control": "no-store"
+      });
+      res.end();
       return;
     }
-    const filePath = path.resolve(root, relativePath);
-
-    if (filePath !== root && !filePath.startsWith(`${root}${path.sep}`)) {
-      res.writeHead(403).end("Forbidden");
-      return;
-    }
-
-    fs.readFile(filePath, (err, content) => {
-      if (err) {
-        res.writeHead(err.code === "ENOENT" ? 404 : 500).end("Not found");
+    if (serveStatic) {
+      const relativePath = requestPath === "/" ? "index.html" : decodeURIComponent(requestPath.slice(1));
+      if (!PUBLIC_FILES.has(relativePath)) {
+        res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("Not found");
         return;
       }
-      res.writeHead(200, {
-        "Content-Type": MIME_TYPES[path.extname(filePath).toLowerCase()] || "application/octet-stream",
-        "Cache-Control": "no-cache",
-        "Referrer-Policy": "same-origin",
-        "X-Content-Type-Options": "nosniff",
-        "X-Frame-Options": "DENY"
+      const filePath = path.resolve(root, relativePath);
+      if (filePath !== root && !filePath.startsWith(`${root}${path.sep}`)) {
+        res.writeHead(403).end("Forbidden");
+        return;
+      }
+      fs.readFile(filePath, (error, content) => {
+        if (error) {
+          res.writeHead(error.code === "ENOENT" ? 404 : 500).end("Not found");
+          return;
+        }
+        res.writeHead(200, {
+          "Content-Type": MIME_TYPES[path.extname(filePath).toLowerCase()] || "application/octet-stream",
+          "Cache-Control": "no-cache",
+          "Referrer-Policy": "same-origin",
+          "X-Content-Type-Options": "nosniff",
+          "X-Frame-Options": "DENY"
+        });
+        res.end(content);
       });
-      res.end(content);
-    });
+      return;
+    }
+    res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("Not found");
   };
 }
 
@@ -112,11 +132,20 @@ function createOutmazeServer(options = {}) {
   const host = options.host;
   const buildSeconds = Number(options.buildSeconds ?? DEFAULT_BUILD_SECONDS);
   const startDelayMs = Number(options.startDelayMs ?? DEFAULT_START_DELAY_MS);
-  const rootDirectory = options.rootDirectory || __dirname;
   const random = options.random || Math.random;
   const now = options.now || Date.now;
-  const server = http.createServer(createStaticHandler(rootDirectory));
-  const wss = new WebSocket.Server({ server, maxPayload: 256 * 1024 });
+  const publicSiteUrl = options.publicSiteUrl || DEFAULT_PUBLIC_SITE_URL;
+  const rootDirectory = options.rootDirectory || __dirname;
+  const serveStatic = options.serveStatic ?? process.env.NODE_ENV !== "production";
+  const allowedOrigins = new Set(
+    parseAllowedOrigins(options.allowedOrigins === undefined ? process.env.ALLOWED_ORIGINS : options.allowedOrigins)
+  );
+  const server = http.createServer(createHttpHandler({ publicSiteUrl, rootDirectory, serveStatic }));
+  const websocketOptions = { server, maxPayload: 256 * 1024 };
+  if (allowedOrigins.size > 0) {
+    websocketOptions.verifyClient = ({ origin }) => allowedOrigins.has(normalizeOrigin(origin));
+  }
+  const wss = new WebSocket.Server(websocketOptions);
   const rooms = new Map();
   const heartbeatTimer = setInterval(() => {
     wss.clients.forEach((client) => {
@@ -458,6 +487,8 @@ if (require.main === module) {
 
 module.exports = {
   createOutmazeServer,
+  normalizeOrigin,
+  parseAllowedOrigins,
   normalizeRoomCode,
   validateMazePayload
 };

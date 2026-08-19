@@ -9,8 +9,8 @@ function emptyGrid(marker = null) {
   return grid;
 }
 
-function createClient(url) {
-  const ws = new WebSocket(url);
+function createClient(url, options = {}) {
+  const ws = new WebSocket(url, options);
   const inbox = [];
   const waiters = [];
 
@@ -56,6 +56,19 @@ function createClient(url) {
   };
 }
 
+function rejectedConnectionStatus(url, options = {}) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url, options);
+    ws.once("open", () => reject(new Error("Rejected WebSocket connection unexpectedly opened")));
+    ws.once("unexpected-response", (_request, response) => {
+      const statusCode = response.statusCode;
+      response.resume();
+      resolve(statusCode);
+    });
+    ws.once("error", reject);
+  });
+}
+
 test("room codes and submitted mazes are normalized and validated", () => {
   assert.equal(normalizeRoomCode(" ab-c2! "), "ABC2");
   assert.equal(normalizeRoomCode("abcdef"), "ABCDE");
@@ -68,6 +81,27 @@ test("room codes and submitted mazes are normalized and validated", () => {
   assert.equal(valid.error, undefined);
   assert.equal(valid.value.grid[3][2], 14);
   assert.deepEqual(valid.value.special.cell, { x: 4, y: 5 });
+});
+
+test("public backend redirects visitors and only accepts configured browser origins", async (t) => {
+  const allowedOrigin = "https://ezarox.github.io";
+  const publicSiteUrl = `${allowedOrigin}/outmaze/`;
+  const app = createOutmazeServer({ port: 0, allowedOrigins: [allowedOrigin], publicSiteUrl, serveStatic: false });
+  const address = await app.listen();
+  const httpUrl = `http://127.0.0.1:${address.port}`;
+  const wsUrl = `ws://127.0.0.1:${address.port}`;
+  t.after(() => app.close());
+
+  const landingResponse = await fetch(httpUrl, { redirect: "manual" });
+  assert.equal(landingResponse.status, 302);
+  assert.equal(landingResponse.headers.get("location"), publicSiteUrl);
+
+  const accepted = createClient(wsUrl, { origin: allowedOrigin });
+  t.after(() => accepted.close());
+  await accepted.opened;
+
+  assert.equal(await rejectedConnectionStatus(wsUrl, { origin: "https://example.com" }), 401);
+  assert.equal(await rejectedConnectionStatus(wsUrl), 401);
 });
 
 test("server synchronizes a private two-player build before revealing either maze", async (t) => {

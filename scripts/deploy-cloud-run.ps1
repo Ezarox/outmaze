@@ -25,7 +25,7 @@ gcloud run deploy $Service `
   --max-instances 1 `
   --memory 512Mi `
   --cpu 1 `
-  --set-env-vars NODE_ENV=production `
+  --set-env-vars "NODE_ENV=production,ALLOWED_ORIGINS=https://ezarox.github.io,PUBLIC_SITE_URL=https://ezarox.github.io/outmaze/" `
   --quiet
 
 gcloud run services describe $Service `
