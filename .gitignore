@@ -2,3 +2,6 @@ node_modules/
 .npm-cache/
 ai-data/
 ai-models/*.json
+*.lines
+diagnostics.txt
+utf-run.ps1
