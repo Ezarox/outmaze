@@ -1,0 +1,11 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Outmaze clients use the authenticated Cloud Run API. Browser SDKs never
+    // access profiles or leaderboard documents directly.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

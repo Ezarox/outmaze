@@ -52,8 +52,11 @@
 - [x] Restore and test the two-player local lobby and WebSocket flow.
 - [x] Use the single-board build view and opponent reveal transition for both players.
 - [x] Validate shared seeds, private maze submission, rematches, early starts, and disconnect recovery locally.
-- [ ] Separate production hosting and deployment from local multiplayer implementation.
-- [ ] Later explore multi-player lobbies and a pannable view of all race boards.
+- [x] Separate production hosting and deployment from local multiplayer implementation.
+- [x] Require one persistent Google-backed name and emoji across online modes.
+- [x] Add 2–8 player Party Mode with host-selected rounds, synchronized private builds, placement points, and an all-maze race gallery.
+- [x] Add a UTC Daily Challenge with a hidden AI maze, public AI benchmark, unlimited edits, server-verified results, and a global best-time leaderboard.
+- [ ] Add reconnect grace periods and move live room state out of the single Cloud Run instance before scaling horizontally.
 
 ## Later modes
 

@@ -17,6 +17,10 @@
   <div id="menuOverlay" class="menu-overlay">
     <div class="menu-card menu-card--home">
       <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+      <button id="menuProfile" class="profile-chip" type="button">
+        <span id="menuProfileEmoji" aria-hidden="true">👤</span>
+        <span id="menuProfileName">Create profile</span>
+      </button>
       <p class="eyebrow">Strategy maze racing</p>
       <h1>Outmaze</h1>
       <p class="menu-tagline">Build the maze that lasts.</p>
@@ -30,8 +34,14 @@
         <button id="menuVs" class="button button--quiet" type="button" aria-describedby="multiplayerNote">
           Play a friend
         </button>
+        <button id="menuParty" class="button button--quiet" type="button" aria-describedby="multiplayerNote">
+          Party mode
+        </button>
+        <button id="menuDaily" class="button button--quiet" type="button" aria-describedby="multiplayerNote">
+          Daily challenge
+        </button>
       </div>
-      <p id="multiplayerNote" class="menu-footnote">Create a private room and race another player on the same seed.</p>
+      <p id="multiplayerNote" class="menu-footnote">Online modes use your name and emoji across rooms and leaderboards.</p>
     </div>
   </div>
 
@@ -39,6 +49,36 @@
     <div class="menu-card loading-card">
       <span class="loading-spinner" aria-hidden="true"></span>
       <p id="loadingText">Preparing your seed…</p>
+    </div>
+  </div>
+
+  <div id="profileOverlay" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="profileTitle">
+    <div class="profile-card">
+      <button id="closeProfile" class="icon-button modal-close" type="button" aria-label="Close profile">&#215;</button>
+      <p class="eyebrow">One identity everywhere</p>
+      <h2 id="profileTitle">Your Outmaze profile</h2>
+      <p class="profile-lead">Your Google account keeps one name and emoji attached to friend rooms, parties, and Daily scores.</p>
+      <div id="profileSignedOut" class="profile-auth-view">
+        <button id="profileGoogleSignIn" class="button button--primary button--large" type="button">Continue with Google</button>
+        <button id="profileDevSignIn" class="button button--quiet hidden" type="button">Create local test profile</button>
+        <p id="profileAuthStatus" class="profile-status" role="status" aria-live="polite"></p>
+      </div>
+      <form id="profileForm" class="profile-form hidden">
+        <p id="profileAccount" class="profile-account"></p>
+        <label class="profile-name-field">
+          <span>Display name</span>
+          <input id="profileNameInput" type="text" minlength="2" maxlength="18" autocomplete="nickname" required />
+        </label>
+        <fieldset class="profile-emoji-field">
+          <legend>Choose an emoji</legend>
+          <div id="profileEmojiGrid" class="profile-emoji-grid"></div>
+        </fieldset>
+        <p id="profileSaveStatus" class="profile-status" role="status" aria-live="polite"></p>
+        <div class="profile-actions">
+          <button class="button button--primary" type="submit">Save profile</button>
+          <button id="profileSignOut" class="button button--quiet" type="button">Sign out</button>
+        </div>
+      </form>
     </div>
   </div>
 
@@ -160,6 +200,69 @@
       <button id="vsLeave" class="text-button vs-leave hidden" type="button">Leave room</button>
     </section>
 
+    <section id="partyPanel" class="party-panel hidden" aria-label="Party match controls">
+      <div class="party-heading">
+        <div>
+          <p class="info-kicker">Party mode</p>
+          <h3 id="partyTitle">Create or join a party</h3>
+        </div>
+        <button id="partyCopyRoom" class="vs-room-badge hidden" type="button" title="Copy party code">
+          Room <strong id="partyRoomCode">-----</strong>
+        </button>
+      </div>
+      <p id="partyStatus" class="vs-status" role="status" aria-live="polite">Gather 2–8 players, then race across several seeds.</p>
+      <div id="partyLobbyActions" class="party-lobby-actions">
+        <label id="partyRoundsField" class="party-rounds-field">
+          <span>Rounds</span>
+          <select id="partyRounds"></select>
+        </label>
+        <button id="partyCreate" class="button button--primary" type="button">Create party</button>
+        <span class="vs-divider">or</span>
+        <label class="vs-room-field">
+          <span class="sr-only">Party code</span>
+          <input id="partyRoomInput" type="text" placeholder="Party code" maxlength="5" autocomplete="off" autocapitalize="characters" spellcheck="false" />
+        </label>
+        <button id="partyJoin" class="button button--quiet" type="button">Join party</button>
+      </div>
+      <div id="partyMatchActions" class="party-match-actions hidden">
+        <button id="partyReady" class="button button--primary" type="button" aria-pressed="false">Ready up</button>
+        <button id="partyStart" class="button button--quiet hidden" type="button">Start party</button>
+        <button id="partyEarlyStart" class="button button--quiet hidden" type="button" aria-pressed="false">Ready to start early</button>
+        <button id="partyNext" class="button button--primary hidden" type="button">Next round</button>
+        <button id="partySkip" class="button button--quiet hidden" type="button">Skip race</button>
+      </div>
+      <div id="partyProgress" class="party-progress hidden" aria-label="Party progress">
+        <span id="partyRoundLabel">Round 1 of 3</span>
+        <div class="party-progress-track"><i id="partyProgressFill"></i></div>
+      </div>
+      <div id="partyRoster" class="party-roster" aria-label="Party players"></div>
+      <button id="partyLeave" class="text-button vs-leave hidden" type="button">Leave party</button>
+    </section>
+
+    <section id="dailyPanel" class="daily-panel hidden" aria-label="Daily challenge information">
+      <div class="daily-summary">
+        <div>
+          <p class="info-kicker">Daily challenge</p>
+          <h3 id="dailyTitle">Today’s shared seed</h3>
+        </div>
+        <span id="dailyDate" class="daily-date">----</span>
+      </div>
+      <div class="daily-metrics">
+        <div><span>AI benchmark</span><strong id="dailyAiTime">--</strong></div>
+        <div><span>Your best</span><strong id="dailyBest">--</strong></div>
+        <div><span>Attempts</span><strong id="dailyAttempts">0</strong></div>
+      </div>
+      <p id="dailyStatus" class="vs-status" role="status" aria-live="polite">The AI time is public; its maze remains hidden.</p>
+      <div id="dailyActions" class="daily-actions hidden">
+        <button id="dailyModify" class="button button--primary" type="button">Modify maze</button>
+        <button id="dailyBack" class="button button--quiet" type="button">Main menu</button>
+      </div>
+      <div class="daily-leaderboard-wrap">
+        <div class="daily-leaderboard-heading"><strong>Global leaderboard</strong><span>Longest time wins</span></div>
+        <ol id="dailyLeaderboard" class="daily-leaderboard"></ol>
+      </div>
+    </section>
+
     <section id="resourceToolbar" class="resource-toolbar hidden" aria-label="Build tools">
       <button id="wallsCard" class="resource-card resource-card--walls" type="button" aria-keyshortcuts="1" aria-describedby="toolDetailBody">
         <span class="resource-key" aria-hidden="true">1</span>
@@ -227,6 +330,8 @@
       </aside>
     </div>
 
+    <section id="partyGallery" class="party-gallery hidden" aria-label="Party maze race"></section>
+
     <section class="hud hidden" id="gameHud" aria-label="Round options">
       <details class="round-options">
         <summary>Seed and round options</summary>
@@ -268,6 +373,9 @@
   </div>
 
   <script src="ai-core.js"></script>
+  <script src="firebase-config.js"></script>
+  <script src="account.js"></script>
   <script src="main.js"></script>
+  <script src="online-modes.js"></script>
 </body>
 </html>

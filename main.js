@@ -519,14 +519,14 @@ function drawNotableIcon(canvasEl, iconName, dimmed = false) {
 
 function updateStartRaceControl() {
   if (!startRaceBtn) return;
-  const canStart = state.mode === "game" && state.building && !state.vs.active;
+  const canStart = state.mode === "game" && state.building && !state.vs.active && !state.party.active;
   startRaceBtn.disabled = !canStart;
   startRaceBtn.textContent = "Start now";
 }
 
 function setCanvasPresentation(mode) {
-  const raceMode = mode === "race";
-  const width = raceMode ? CANVAS_WIDTH : VIEW_RENDER_WIDTH;
+  const raceMode = mode === "race" || mode === "solo-race";
+  const width = mode === "race" ? CANVAS_WIDTH : VIEW_RENDER_WIDTH;
   if (canvas.width !== width) canvas.width = width;
   if (canvas.height !== CANVAS_HEIGHT) canvas.height = CANVAS_HEIGHT;
   canvasWrapper?.classList.toggle("build-view", !raceMode);
@@ -535,7 +535,11 @@ function setCanvasPresentation(mode) {
   resourceToolbar?.classList.toggle("hidden", raceMode || state.mode !== "game");
   canvas.setAttribute(
     "aria-label",
-    raceMode ? "Outmaze race showing your maze and the opponent maze" : "Interactive Outmaze construction grid"
+    mode === "race"
+      ? "Outmaze race showing your maze and the opponent maze"
+      : mode === "solo-race"
+        ? "Outmaze Daily runner on your maze"
+        : "Interactive Outmaze construction grid"
   );
 }
 
@@ -602,7 +606,7 @@ function completeTutorial() {
 }
 
 function requestStartRace() {
-  if (!state.building || state.vs.active) return;
+  if (!state.building || state.vs.active || state.party.active) return;
   announce("Maze locked. Preparing the reveal.");
   startRace();
 }
@@ -799,6 +803,7 @@ const state = {
     ready: false,
     players: 0,
     readyCount: 0,
+    members: [],
     phase: "disconnected",
     roundId: null,
     mazeSubmitted: false,
@@ -821,6 +826,25 @@ const state = {
     earlyStartSelf: false,
     earlyStartPeer: false,
     earlyStartTriggered: false
+  },
+  party: {
+    active: false,
+    room: null,
+    phase: "idle",
+    roundId: null,
+    round: 0,
+    rounds: 3,
+    buildEndsAt: null,
+    locked: false,
+    submitted: false,
+    members: [],
+    results: null
+  },
+  daily: {
+    active: false,
+    challenge: null,
+    submitting: false,
+    attemptComplete: false
   }
 };
 let padPulseTimer = 0;
@@ -1020,9 +1044,16 @@ function startGame(seedText) {
   state.waitingForSpecial = false;
   setBuildMode("normal");
   updateSpecialInfo();
+  const phaseHint = state.vs.active
+    ? "Keep your runner trapped longer than your opponent."
+    : state.party.active
+      ? "Build privately; every party member is shaping the same seed."
+      : state.daily.active
+        ? `Try to beat today’s ${Number(state.daily.challenge?.aiTime || 0).toFixed(2)}s AI benchmark.`
+        : "Keep your runner trapped longer than the AI.";
   updatePhaseLabel(
     "Build your maze",
-    state.vs.active ? "Keep your runner trapped longer than your opponent." : "Keep your runner trapped longer than the AI."
+    phaseHint
   );
   hidePopup();
   state.mode = "game";
@@ -1033,10 +1064,11 @@ function startGame(seedText) {
   updateSeedIntel();
   updateStartRaceControl();
   announce(`Seed ${safeSeed}. ${state.coinBudget} walls, ${state.singleBudget} single wall${state.singleBudget === 1 ? "" : "s"}, and a ${getSpecialTypeName(specialType)} hazard.`);
-  setSeedUiVisible(!state.vs.active);
+  const needsAiOpponent = !state.vs.active && !state.party.active && !state.daily.active;
+  setSeedUiVisible(needsAiOpponent);
   setVsUiVisible(state.vs.active);
-  // Kick off AI generation in the background (async, non-blocking) unless in VS mode.
-  if (!state.vs.active) {
+  // Kick off AI generation only for the ordinary single-player opponent.
+  if (needsAiOpponent) {
     if (!sameSeed) {
       state.aiPendingSeed = safeSeed;
       const buildToken = ++aiBuildToken;
@@ -1103,7 +1135,34 @@ function sendVsReady() {
   updateVsPanelState();
 }
 
+function updateVsMemberLabels(members = []) {
+  if (!Array.isArray(members)) return;
+  state.vs.members = members;
+  const ownUid = window.OutmazeAccount?.profile?.uid;
+  const self = members.find((member) => member.uid === ownUid) || members.find((member) => member.slot === (state.vs.role === "guest" ? 2 : 1));
+  const peer = members.find((member) => member !== self);
+  if (self) {
+    state.vs.selfLabel = `You · ${self.emoji} ${self.name}`;
+    state.vs.selfShort = `${self.emoji} ${self.name}`;
+  }
+  if (peer) {
+    state.vs.oppLabel = `${peer.emoji} ${peer.name}`;
+    state.vs.oppShort = `${peer.emoji} ${peer.name}`;
+  } else {
+    state.vs.oppLabel = "Opponent";
+    state.vs.oppShort = "Opponent";
+  }
+}
+
 function handleVsEvent(evt) {
+  if (state.party.active && ["connected", "disconnected", "error", "profile-required"].includes(evt.type)) {
+    window.OutmazeOnline?.handleServerEvent?.(evt);
+    return;
+  }
+  if (String(evt.type || "").startsWith("party-")) {
+    window.OutmazeOnline?.handleServerEvent?.(evt);
+    return;
+  }
   if (evt.type === "connected") {
     state.vs.connected = true;
     state.vs.phase = state.vs.room ? "lobby" : "connected";
@@ -1188,6 +1247,7 @@ function handleVsEvent(evt) {
     state.vs.players = Number(evt.players || 0);
     state.vs.readyCount = Number(evt.ready || 0);
     state.vs.phase = evt.phase || state.vs.phase;
+    updateVsMemberLabels(evt.members);
     if (state.vs.phase === "lobby" && state.vs.players === 2 && !state.vs.ready) {
       updateVsStatus("Both players are here. Press Ready when you're set.");
     }
@@ -1408,12 +1468,17 @@ function editAndRetry() {
   if (state.aiSpecial) state.aiSpecial.effectTimer = 0;
   state.neutralSpecials = state.baseNeutralSpecials.map(cloneSpecial);
   setCanvasPresentation("build");
-  updatePhaseLabel("Refine your maze", "Adjust your design, then start another run on the same seed.");
+  if (state.daily.active) {
+    state.daily.attemptComplete = false;
+    updatePhaseLabel("Refine today’s maze", "Make any changes you like, then run another verified attempt.");
+  } else {
+    updatePhaseLabel("Refine your maze", "Adjust your design, then start another run on the same seed.");
+  }
   hidePopup();
   resetVsEarlyStartVotes();
   updateHud();
   updateStartRaceControl();
-  announce("Edit and retry. Your previous maze is ready to refine.");
+  announce(state.daily.active ? "Daily maze ready for another attempt." : "Edit and retry. Your previous maze is ready to refine.");
 }
 
 function resetPadStates(grid) {
@@ -1423,6 +1488,7 @@ function resetPadStates(grid) {
 function startFromMenu() {
   showLoadingOverlay("Preparing...");
   requestAnimationFrame(() => {
+    window.OutmazeOnline?.deactivateModes?.({ closeSocket: true });
     state.vs.active = false;
     setVsUiVisible(false);
     cancelAiBuild();
@@ -1434,9 +1500,12 @@ function startFromMenu() {
   });
 }
 
-function startVsFromMenu() {
+async function startVsFromMenu() {
+  const profile = await window.OutmazeAccount?.requireProfile?.();
+  if (!profile) return;
   showLoadingOverlay("Opening multiplayer…");
   requestAnimationFrame(() => {
+    window.OutmazeOnline?.deactivateModes?.({ closeSocket: false });
     cancelAiBuild();
     clearCurrentGameState();
     state.vs.active = true;
@@ -1790,6 +1859,33 @@ async function startRace(forceStart = false) {
   const playerGrid = cloneGrid(state.playerGrid);
   const playerSpecial = cloneSpecial(state.playerSpecial);
 
+  if (state.daily.active) {
+    if (startToken !== raceStartToken || state.building) return;
+    const playerRunner = coreCreateRunner("You", playerGrid, playerSpecial, state.baseNeutralSpecials);
+    state.race = {
+      runners: [playerRunner],
+      finished: false,
+      started: false,
+      elapsed: null,
+      elapsedTime: 0,
+      simulationComputeMs: 0
+    };
+    state.reveal = {
+      active: true,
+      elapsed: 0,
+      duration: prefersReducedMotion() ? 0.2 : 0.65
+    };
+    state.daily.attemptComplete = false;
+    state.results = { player: null, ai: Number(state.daily.challenge?.aiTime || 0), winner: null };
+    setCanvasPresentation("solo-race");
+    const revealTitle = revealBanner?.querySelector("strong");
+    if (revealTitle) revealTitle.textContent = "Releasing your runner";
+    revealBanner?.classList.remove("hidden");
+    updatePhaseLabel("Daily run", "Your runner is the only maze revealed; the AI benchmark remains a time only.");
+    announce("Daily runner ready. The attempt begins shortly.");
+    return;
+  }
+
   if (!state.aiGrid || !state.aiSpecial) {
     if (state.vs.active && state.vs.opponentMaze) {
       state.aiGrid = cloneGrid(state.vs.opponentMaze.grid || state.vs.opponentMaze);
@@ -1972,6 +2068,7 @@ function leaveVsMode() {
     } catch (_) {}
   }
   versusClient.ws = null;
+  versusClient.authenticated = false;
   updateVsStatus("Disconnected.");
 }
 
@@ -2161,8 +2258,10 @@ function updateVsPlayerStates() {
     peerVisual = mismatch ? "warning" : matched ? "ready" : state.vs.choicePeer ? "selected" : raceComplete ? "waiting" : "active";
   }
 
-  setVsPlayerState(vsSelfState, vsSelfStateLabel, vsSelfStateText, "You", selfText, selfVisual);
-  setVsPlayerState(vsPeerState, vsPeerStateLabel, vsPeerStateText, "Opponent", peerText, peerVisual);
+  const selfLabel = state.vs.selfShort && state.vs.selfShort !== "You" ? `${state.vs.selfShort} (You)` : "You";
+  const peerLabel = state.vs.oppShort || "Opponent";
+  setVsPlayerState(vsSelfState, vsSelfStateLabel, vsSelfStateText, selfLabel, selfText, selfVisual);
+  setVsPlayerState(vsPeerState, vsPeerStateLabel, vsPeerStateText, peerLabel, peerText, peerVisual);
 }
 
 const AI_ASYNC_YIELD_BUDGET = 1;
@@ -2271,7 +2370,8 @@ const versusClient = {
   ws: null,
   room: null,
   onEvent: null,
-  pending: []
+  pending: [],
+  authenticated: false
 };
 
 function vsConnect(onEvent = null) {
@@ -2284,19 +2384,32 @@ function vsConnect(onEvent = null) {
     return versusClient.ws;
   }
   const ws = new WebSocket(VS_WS_URL);
-  ws.onopen = () => {
-    const queued = versusClient.pending.splice(0);
-    queued.forEach((message) => ws.send(JSON.stringify(message)));
-    emitVsEvent({ type: "connected" });
+  ws.onopen = async () => {
+    try {
+      const token = await window.OutmazeAccount?.getIdToken?.();
+      if (!token) throw new Error("Sign in to continue");
+      ws.send(JSON.stringify({ type: "auth", token }));
+    } catch (error) {
+      emitVsEvent({ type: "error", code: "sign-in-required", error: error.message });
+      ws.close();
+    }
   };
   ws.onclose = () => {
     if (versusClient.ws === ws) versusClient.ws = null;
+    versusClient.authenticated = false;
     emitVsEvent({ type: "disconnected" });
   };
   ws.onerror = () => emitVsEvent({ type: "error", error: "Could not connect to the multiplayer server" });
   ws.onmessage = (evt) => {
     try {
       const data = JSON.parse(evt.data);
+      if (data.type === "authenticated") {
+        versusClient.authenticated = true;
+        const queued = versusClient.pending.splice(0);
+        queued.forEach((message) => ws.send(JSON.stringify(message)));
+        emitVsEvent({ type: "connected", profile: data.profile });
+        return;
+      }
       emitVsEvent(data);
     } catch (err) {
       emitVsEvent({ type: "error", error: "bad message" });
@@ -2311,7 +2424,7 @@ function emitVsEvent(evt) {
 }
 
 function vsSend(data) {
-  if (versusClient.ws?.readyState === WebSocket.OPEN) {
+  if (versusClient.ws?.readyState === WebSocket.OPEN && versusClient.authenticated) {
     versusClient.ws.send(JSON.stringify(data));
     return true;
   }
@@ -3370,13 +3483,47 @@ function updateRace(delta) {
     state.race.elapsed = Math.max(playerTime, aiTime);
     state.race.elapsedTime = state.race.elapsed;
     state.performance.simulationMs = state.race.simulationComputeMs;
-    decideWinner();
-    updatePhaseLabel("Round complete", "Compare the escape times, then refine this seed or begin another.");
+    if (state.daily.active) {
+      finishDailyAttempt();
+    } else {
+      decideWinner();
+      updatePhaseLabel("Round complete", "Compare the escape times, then refine this seed or begin another.");
+    }
+  }
+}
+
+async function finishDailyAttempt() {
+  if (!state.daily.active || state.daily.submitting) return;
+  state.daily.submitting = true;
+  updatePhaseLabel("Verifying Daily time", "Checking this maze with the shared server rules.");
+  try {
+    const result = await window.OutmazeOnline?.completeDailyAttempt?.({
+      grid: cloneGrid(state.playerGrid),
+      special: cloneSpecial(state.playerSpecial)
+    });
+    if (!result) throw new Error("The Daily result could not be verified");
+    state.results.player = Number(result.submittedTime);
+    state.results.ai = Number(state.daily.challenge?.aiTime || result.aiTime || 0);
+    const player = state.results.player;
+    const ai = state.results.ai;
+    state.results.winner = player > ai ? "You win!" : player < ai ? `${getOpponentLabel()} wins!` : "Tie!";
+    state.race.elapsed = player;
+    state.race.elapsedTime = player;
+    state.daily.attemptComplete = true;
+    updatePhaseLabel("Daily attempt complete", "Modify this maze and try again—your best verified time is saved.");
+    showResultPopup();
+  } catch (error) {
+    state.results.winner = "Verification failed";
+    updatePhaseLabel("Daily result not saved", error.message || "Please try this attempt again.");
+    window.OutmazeOnline?.showDailyError?.(error);
+  } finally {
+    state.daily.submitting = false;
+    window.OutmazeOnline?.updateDailyPanel?.();
   }
 }
 
 function recordResult(runner, time) {
-  const isSelf = runner.label === "You";
+  const isSelf = runner.label === "You" || runner.label.startsWith("You ·");
   if (isSelf) {
     state.results.player = time;
   } else {
@@ -3411,7 +3558,9 @@ function updateState(delta) {
   padPulseTimer = (padPulseTimer + delta) % PAD_PULSE_PERIOD;
   if (state.building) {
     if (!state.paused) {
-      if (!state.vs.active) {
+      if (state.party.active && state.party.buildEndsAt) {
+        state.buildTimeLeft = Math.max(0, (state.party.buildEndsAt - Date.now()) / 1000);
+      } else if (!state.vs.active) {
         const clock = AICore.advanceBuildClock(state.buildTimeLeft, delta);
         state.buildTimeLeft = clock.timeLeft;
         if (clock.expired) {
@@ -3428,9 +3577,12 @@ function updateState(delta) {
       state.reveal.active = false;
       if (state.race) state.race.started = true;
       revealBanner?.classList.add("hidden");
-      updatePhaseLabel("Race in progress", "The longest escape time wins.");
+      updatePhaseLabel(
+        state.daily.active ? "Daily run in progress" : "Race in progress",
+        state.daily.active ? "Push this maze beyond the hidden AI design’s benchmark time." : "The longest escape time wins."
+      );
       if (state.vs.active) updateVsStatus("Race in progress. The longest escape time wins.");
-      announce("Runners released.");
+      announce(state.daily.active ? "Daily runner released." : "Runners released.");
     }
   } else if (state.race && !state.paused && !state.race.finished) {
     updateRace(delta);
@@ -3447,6 +3599,22 @@ function updateHud() {
     return;
   }
 
+  if (state.party.active && ["connecting", "connected", "lobby"].includes(state.party.phase)) {
+    timerEl.textContent = "--";
+    timerStatusEl.textContent = "Waiting for party";
+    if (scoreEl) scoreEl.textContent = formatScoreText();
+    updateResourceCards();
+    return;
+  }
+
+  if (state.party.active && state.party.phase === "results") {
+    timerEl.textContent = "--";
+    timerStatusEl.textContent = "Party results";
+    if (scoreEl) scoreEl.textContent = formatScoreText();
+    updateResourceCards();
+    return;
+  }
+
   if (state.vs.active && state.vs.waitingForStart) {
     timerEl.textContent = "--";
     timerStatusEl.textContent = "Waiting for other player";
@@ -3459,13 +3627,15 @@ function updateHud() {
     timerEl.textContent = "--";
     timerStatusEl.textContent = "Paused";
   } else if (state.building) {
-    if (state.vs.active && state.vs.buildEndsAt) {
+    if (state.party.active && state.party.buildEndsAt) {
+      state.buildTimeLeft = Math.max(0, (state.party.buildEndsAt - Date.now()) / 1000);
+    } else if (state.vs.active && state.vs.buildEndsAt) {
       const now = Date.now();
       const remaining = Math.max(0, (state.vs.buildEndsAt - now) / 1000);
       state.buildTimeLeft = remaining;
     }
     timerEl.textContent = `${Math.max(0, state.buildTimeLeft).toFixed(1)}s`;
-    timerStatusEl.textContent = state.vs.active ? "VS build phase" : "Build phase";
+    timerStatusEl.textContent = state.party.active ? "Party build phase" : state.vs.active ? "VS build phase" : state.daily.active ? "Daily build phase" : "Build phase";
   } else if (state.reveal?.active) {
     timerEl.textContent = "--";
     timerStatusEl.textContent = "Revealing mazes";
@@ -3475,10 +3645,10 @@ function updateHud() {
   } else if (state.race && !state.race.finished) {
     const elapsed = state.race.elapsedTime || 0;
     timerEl.textContent = `${elapsed.toFixed(1)}s`;
-    timerStatusEl.textContent = state.vs.active ? "VS race in progress" : "Race in progress";
+    timerStatusEl.textContent = state.vs.active ? "VS race in progress" : state.daily.active ? "Daily run in progress" : "Race in progress";
   } else if (state.race && state.race.finished && state.race.elapsed !== null) {
     timerEl.textContent = `${state.race.elapsed.toFixed(1)}s`;
-    timerStatusEl.textContent = state.vs.active ? "VS race complete" : "Race complete";
+    timerStatusEl.textContent = state.vs.active ? "VS race complete" : state.daily.active ? "Daily attempt complete" : "Race complete";
   } else {
     timerEl.textContent = "--";
     timerStatusEl.textContent = "Ready";
@@ -3534,10 +3704,17 @@ function updateCurrencySelection(forceDisabled = false) {
 }
 
 function getOpponentLabel() {
+  if (state.daily.active) return "Daily AI";
   return state.vs.active ? state.vs.oppLabel || "Opponent" : "AI";
 }
 
 function formatScoreText() {
+  if (state.party.active) {
+    const uid = window.OutmazeAccount?.profile?.uid;
+    const self = state.party.members.find((member) => member.uid === uid);
+    const score = Number(self?.score || 0);
+    return `Placement points: ${score.toFixed(score % 1 ? 1 : 0)}`;
+  }
   const finished = !!(state.race && state.race.finished);
   const formatVal = (val) => {
     if (val == null) return finished ? "DNF" : "--";
@@ -3546,6 +3723,7 @@ function formatScoreText() {
   const playerText = formatVal(state.results.player);
   const foeText = formatVal(state.results.ai);
   const oppLabel = getOpponentLabel();
+  if (state.daily.active) return `Score: You ${playerText} | AI benchmark ${foeText}`;
   return `Score: You ${playerText} | ${oppLabel} ${foeText}`;
 }
 
@@ -4274,6 +4452,7 @@ function notifySpecialNeeded() {
 }
 
 function showMainMenu() {
+  if (state.party.active || state.daily.active) window.OutmazeOnline?.deactivateModes?.({ closeSocket: true });
   closeCatalogue();
   state.mode = "menu";
   state.paused = true;

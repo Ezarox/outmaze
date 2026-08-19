@@ -2,6 +2,16 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const WebSocket = require("ws");
+const {
+  createAuthService,
+  createDailyService,
+  createFirestoreStore,
+  createMemoryStore,
+  publicProfile,
+  scorePartyPlacements,
+  simulateValidatedMaze,
+  validateMazeForSeed
+} = require("./online-services.js");
 
 const DEFAULT_PORT = Number(process.env.PORT || 8080);
 const DEFAULT_BUILD_SECONDS = 60;
@@ -11,7 +21,16 @@ const MAX_CELL_VALUE = 15;
 const ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const SPECIAL_TYPES = new Set(["radius", "row", "column", "gravity", "lightning"]);
 const DEFAULT_PUBLIC_SITE_URL = process.env.PUBLIC_SITE_URL || "https://ezarox.github.io/outmaze/";
-const PUBLIC_FILES = new Set(["index.html", "style.css", "ai-core.js", "ai-worker.js", "main.js"]);
+const PUBLIC_FILES = new Set([
+  "index.html",
+  "style.css",
+  "ai-core.js",
+  "ai-worker.js",
+  "firebase-config.js",
+  "account.js",
+  "online-modes.js",
+  "main.js"
+]);
 
 const MIME_TYPES = {
   ".css": "text/css; charset=utf-8",
@@ -32,10 +51,74 @@ function parseAllowedOrigins(value) {
   return [...new Set(candidates.map(normalizeOrigin).filter(Boolean))];
 }
 
-function createHttpHandler({ publicSiteUrl = DEFAULT_PUBLIC_SITE_URL, rootDirectory = __dirname, serveStatic = false }) {
+function sendJson(res, status, payload, headers = {}) {
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    ...headers
+  });
+  res.end(JSON.stringify(payload));
+}
+
+function readJsonBody(req, maxBytes = 300 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        reject(Object.assign(new Error("Request is too large"), { code: "payload-too-large", status: 413 }));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      try {
+        resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {});
+      } catch (_) {
+        reject(Object.assign(new Error("Request body must be valid JSON"), { code: "invalid-json", status: 400 }));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+function createHttpHandler({
+  publicSiteUrl = DEFAULT_PUBLIC_SITE_URL,
+  rootDirectory = __dirname,
+  serveStatic = false,
+  apiHandler = null,
+  allowedOrigins = new Set()
+}) {
   const root = path.resolve(rootDirectory);
-  return (req, res) => {
+  return async (req, res) => {
     const requestPath = new URL(req.url, `http://${req.headers.host || "localhost"}`).pathname;
+    if (requestPath.startsWith("/api/") && requestPath !== "/api/health" && apiHandler) {
+      const origin = normalizeOrigin(req.headers.origin);
+      const corsHeaders = origin && allowedOrigins.has(origin)
+        ? { "Access-Control-Allow-Origin": origin, Vary: "Origin" }
+        : {};
+      if (req.method === "OPTIONS") {
+        res.writeHead(204, {
+          ...corsHeaders,
+          "Access-Control-Allow-Headers": "Authorization, Content-Type",
+          "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
+          "Access-Control-Max-Age": "3600"
+        });
+        res.end();
+        return;
+      }
+      try {
+        await apiHandler(req, res, requestPath, corsHeaders);
+      } catch (error) {
+        sendJson(res, Number(error.status || 500), {
+          error: error.message || "Unexpected server error",
+          code: error.code || "server-error"
+        }, corsHeaders);
+      }
+      return;
+    }
     if (requestPath === "/healthz" || requestPath === "/api/health") {
       res.writeHead(200, {
         "Content-Type": "application/json; charset=utf-8",
@@ -140,13 +223,69 @@ function createOutmazeServer(options = {}) {
   const allowedOrigins = new Set(
     parseAllowedOrigins(options.allowedOrigins === undefined ? process.env.ALLOWED_ORIGINS : options.allowedOrigins)
   );
-  const server = http.createServer(createHttpHandler({ publicSiteUrl, rootDirectory, serveStatic }));
+  const projectId = options.projectId || process.env.OUTMAZE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT;
+  const useFirestore = options.useFirestore ?? process.env.FIRESTORE_ENABLED === "true";
+  const store = options.store || (useFirestore
+    ? createFirestoreStore({ projectId })
+    : createMemoryStore());
+  const allowDevTokens = options.allowDevTokens ?? process.env.NODE_ENV !== "production";
+  const authService = options.authService || createAuthService({
+    projectId,
+    firebase: options.firebaseAuth ?? process.env.NODE_ENV === "production",
+    allowDevTokens
+  });
+  const dailyService = options.dailyService || createDailyService({ store });
+  const requireProfiles = options.requireProfiles ?? process.env.REQUIRE_PROFILES === "true";
+
+  async function authenticateRequest(req, required = true) {
+    const authorization = String(req.headers.authorization || "");
+    const token = authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
+    if (!token) {
+      if (!required) return null;
+      throw Object.assign(new Error("Sign in to continue"), { code: "sign-in-required", status: 401 });
+    }
+    return authService.verify(token);
+  }
+
+  async function apiHandler(req, res, requestPath, corsHeaders) {
+    if (requestPath === "/api/profile" && req.method === "GET") {
+      const identity = await authenticateRequest(req);
+      sendJson(res, 200, { profile: publicProfile(await store.getProfile(identity.uid)) }, corsHeaders);
+      return;
+    }
+    if (requestPath === "/api/profile" && (req.method === "POST" || req.method === "PUT")) {
+      const identity = await authenticateRequest(req);
+      const body = await readJsonBody(req, 16 * 1024);
+      const profile = await store.saveProfile(identity.uid, body);
+      sendJson(res, 200, { profile: publicProfile(profile) }, corsHeaders);
+      return;
+    }
+    if (requestPath === "/api/daily" && req.method === "GET") {
+      const identity = await authenticateRequest(req, false);
+      sendJson(res, 200, await dailyService.get(identity?.uid || null), corsHeaders);
+      return;
+    }
+    if (requestPath === "/api/daily/submit" && req.method === "POST") {
+      const identity = await authenticateRequest(req);
+      const profile = await store.getProfile(identity.uid);
+      if (!profile) throw Object.assign(new Error("Create your Outmaze profile first"), { code: "profile-required", status: 403 });
+      const body = await readJsonBody(req);
+      sendJson(res, 200, await dailyService.submit(identity.uid, body), corsHeaders);
+      return;
+    }
+    sendJson(res, 404, { error: "Not found", code: "not-found" }, corsHeaders);
+  }
+
+  const server = http.createServer(
+    createHttpHandler({ publicSiteUrl, rootDirectory, serveStatic, apiHandler, allowedOrigins })
+  );
   const websocketOptions = { server, maxPayload: 256 * 1024 };
   if (allowedOrigins.size > 0) {
     websocketOptions.verifyClient = ({ origin }) => allowedOrigins.has(normalizeOrigin(origin));
   }
   const wss = new WebSocket.Server(websocketOptions);
   const rooms = new Map();
+  let anonymousCounter = 0;
   const heartbeatTimer = setInterval(() => {
     wss.clients.forEach((client) => {
       if (client.isAlive === false) {
@@ -167,14 +306,46 @@ function createOutmazeServer(options = {}) {
     room.players.forEach((player) => send(player.ws, message));
   }
 
+  function playerUid(player) {
+    return player.identity?.uid || `anonymous-${player.slot}`;
+  }
+
+  function memberState(room, player) {
+    const uid = playerUid(player);
+    return {
+      uid,
+      slot: player.slot,
+      name: player.profile?.name || `Player ${player.slot}`,
+      emoji: player.profile?.emoji || "👤",
+      host: room.players[0] === player,
+      ready: room.ready.has(player.ws),
+      early: room.earlyVotes.has(player.ws),
+      score: Number(room.scores?.get(uid) || 0)
+    };
+  }
+
   function roomState(room) {
+    if (room.mode === "party") {
+      return {
+        type: "party-state",
+        room: room.code,
+        phase: room.phase,
+        roundId: room.roundId || null,
+        round: room.roundNumber || 0,
+        rounds: room.roundsTotal,
+        seed: room.seed || "",
+        locked: room.locked,
+        members: room.players.map((player) => memberState(room, player))
+      };
+    }
     return {
       type: "room-state",
       room: room.code,
       players: room.players.length,
       ready: room.ready.size,
       phase: room.phase,
-      roundId: room.roundId || null
+      roundId: room.roundId || null,
+      members: room.players.map((player) => memberState(room, player))
     };
   }
 
@@ -204,7 +375,7 @@ function createOutmazeServer(options = {}) {
     room.ready.clear();
     room.submissions.clear();
     room.earlyVotes.clear();
-    room.rematchChoices.clear();
+    room.rematchChoices?.clear();
     room.locked = false;
   }
 
@@ -264,6 +435,77 @@ function createOutmazeServer(options = {}) {
     broadcastRoomState(room);
   }
 
+  function normalizeRoundCount(value) {
+    return Math.max(1, Math.min(10, Number(value) | 0 || 3));
+  }
+
+  function lockPartyRound(room, reason) {
+    if (room.mode !== "party" || room.phase !== "building" || room.locked) return;
+    room.locked = true;
+    clearRoomTimer(room);
+    broadcast(room, { type: "party-lock", roundId: room.roundId, reason });
+    broadcastRoomState(room);
+  }
+
+  function startPartyRound(room, resetMatch = false) {
+    if (room.mode !== "party" || room.players.length < 2) return;
+    resetRoundState(room);
+    if (resetMatch) {
+      room.roundNumber = 0;
+      room.scores.clear();
+    }
+    room.phase = "building";
+    room.roundId += 1;
+    room.roundNumber += 1;
+    room.seed = Math.floor(random() * 1e9).toString();
+    const startsAt = now() + startDelayMs;
+    const buildEndsAt = startsAt + buildSeconds * 1000;
+    broadcast(room, {
+      type: "party-start",
+      room: room.code,
+      roundId: room.roundId,
+      round: room.roundNumber,
+      rounds: room.roundsTotal,
+      seed: room.seed,
+      startsAt,
+      buildEndsAt,
+      buildSeconds
+    });
+    room.lockTimer = setTimeout(() => lockPartyRound(room, "timer"), Math.max(0, buildEndsAt - now()));
+    broadcastRoomState(room);
+  }
+
+  function revealPartyIfReady(room) {
+    if (room.mode !== "party" || room.players.length < 2 || room.submissions.size !== room.players.length) return;
+    room.phase = "results";
+    const placements = scorePartyPlacements(
+      room.players.map((player) => {
+        const submission = room.submissions.get(player.ws);
+        const member = memberState(room, player);
+        return {
+          uid: member.uid,
+          profile: { uid: member.uid, name: member.name, emoji: member.emoji },
+          time: submission.time,
+          maze: submission.payload
+        };
+      })
+    );
+    placements.forEach((entry) => {
+      room.scores.set(entry.uid, Number(room.scores.get(entry.uid) || 0) + entry.points);
+      entry.totalPoints = room.scores.get(entry.uid);
+    });
+    broadcast(room, {
+      type: "party-results",
+      room: room.code,
+      roundId: room.roundId,
+      round: room.roundNumber,
+      rounds: room.roundsTotal,
+      finalRound: room.roundNumber >= room.roundsTotal,
+      entries: placements
+    });
+    broadcastRoomState(room);
+  }
+
   function revealMazesIfReady(room) {
     if (room.submissions.size !== 2 || room.players.length !== 2) return;
     room.phase = "racing";
@@ -284,7 +526,35 @@ function createOutmazeServer(options = {}) {
   function detachPlayer(room, ws, notify = true) {
     const playerIndex = room.players.findIndex((player) => player.ws === ws);
     if (playerIndex < 0) return;
-    room.players.splice(playerIndex, 1);
+    const [departed] = room.players.splice(playerIndex, 1);
+    room.ready.delete(ws);
+    room.earlyVotes.delete(ws);
+    room.submissions.delete(ws);
+    room.rematchChoices?.delete(ws);
+    room.scores?.delete(playerUid(departed));
+    if (room.mode === "party") {
+      if (!room.players.length) {
+        clearRoomTimer(room);
+        rooms.delete(room.code);
+        return;
+      }
+      room.players.forEach((player, index) => {
+        player.slot = index + 1;
+      });
+      if (room.players.length < 2 && room.phase !== "lobby") {
+        resetRoundState(room);
+        room.phase = "lobby";
+        room.roundNumber = 0;
+        room.scores.clear();
+      } else if (room.phase === "building" && room.locked) {
+        revealPartyIfReady(room);
+      } else if (room.phase === "building" && room.earlyVotes.size === room.players.length) {
+        lockPartyRound(room, "early");
+      }
+      if (notify) broadcast(room, { type: "party-player-left", uid: playerUid(departed) });
+      broadcastRoomState(room);
+      return;
+    }
     resetRoundState(room);
     room.phase = "lobby";
     if (!room.players.length) {
@@ -297,6 +567,8 @@ function createOutmazeServer(options = {}) {
 
   wss.on("connection", (ws) => {
     let currentRoom = null;
+    let identity = null;
+    let profile = null;
     ws.isAlive = true;
     ws.on("pong", () => {
       ws.isAlive = true;
@@ -309,129 +581,277 @@ function createOutmazeServer(options = {}) {
       currentRoom = null;
     }
 
-    ws.on("message", (data) => {
-      let message;
+    async function ensureOnlineProfile() {
+      if (!identity && !requireProfiles) {
+        const id = `anonymous-${++anonymousCounter}`;
+        identity = { uid: id };
+        profile = { uid: id, name: `Player ${anonymousCounter}`, emoji: "👤" };
+      }
+      if (!identity) throw Object.assign(new Error("Sign in to continue"), { code: "sign-in-required", status: 401 });
+      if (!profile) throw Object.assign(new Error("Create your Outmaze profile first"), { code: "profile-required", status: 403 });
+    }
+
+    function makePlayer(slot) {
+      return { ws, slot, identity, profile: publicProfile(profile) };
+    }
+
+    function makeBaseRoom(code, mode) {
+      return {
+        code,
+        mode,
+        players: [makePlayer(1)],
+        ready: new Set(),
+        submissions: new Map(),
+        earlyVotes: new Set(),
+        rematchChoices: new Map(),
+        scores: new Map(),
+        phase: "lobby",
+        roundId: 0,
+        seed: "",
+        locked: false,
+        lockTimer: null
+      };
+    }
+
+    ws.on("message", async (data) => {
       try {
-        message = JSON.parse(data.toString());
-      } catch (_) {
-        send(ws, { type: "error", code: "invalid-json", error: "Invalid message" });
-        return;
-      }
-
-      const type = message?.type;
-      if (type === "create") {
-        leaveCurrentRoom();
-        const code = makeRoomCode();
-        const room = {
-          code,
-          players: [{ ws, slot: 1 }],
-          ready: new Set(),
-          submissions: new Map(),
-          earlyVotes: new Set(),
-          rematchChoices: new Map(),
-          phase: "lobby",
-          roundId: 0,
-          seed: "",
-          locked: false,
-          lockTimer: null
-        };
-        rooms.set(code, room);
-        currentRoom = code;
-        send(ws, { type: "created", room: code, slot: 1 });
-        broadcastRoomState(room);
-        return;
-      }
-
-      if (type === "join") {
-        const code = normalizeRoomCode(message.room);
-        const room = rooms.get(code);
-        if (!room) {
-          send(ws, { type: "error", code: "room-not-found", error: "Room not found" });
+        let message;
+        try {
+          message = JSON.parse(data.toString());
+        } catch (_) {
+          send(ws, { type: "error", code: "invalid-json", error: "Invalid message" });
           return;
         }
-        if (room.players.length >= 2) {
-          send(ws, { type: "error", code: "room-full", error: "Room is full" });
+
+        const type = message?.type;
+        if (type === "auth") {
+          if (currentRoom) throw Object.assign(new Error("Leave the current room before changing account"), { code: "room-active" });
+          identity = await authService.verify(message.token);
+          profile = await store.getProfile(identity.uid);
+          if (!profile) {
+            send(ws, { type: "profile-required" });
+            return;
+          }
+          send(ws, { type: "authenticated", profile: publicProfile(profile) });
           return;
         }
-        if (room.phase !== "lobby") {
-          send(ws, { type: "error", code: "round-active", error: "That room is already playing" });
+
+        if (type === "leave" || type === "party-leave") {
+          leaveCurrentRoom();
           return;
         }
-        leaveCurrentRoom();
-        room.players.push({ ws, slot: 2 });
-        currentRoom = code;
-        send(ws, { type: "joined", room: code, slot: 2 });
-        room.players.forEach((player) => {
-          if (player.ws !== ws) send(player.ws, { type: "peer-joined" });
-        });
-        broadcastRoomState(room);
-        return;
-      }
 
-      const room = currentRoom ? rooms.get(currentRoom) : null;
-      const player = room ? getPlayer(room, ws) : null;
-      if (!room || !player) {
-        send(ws, { type: "error", code: "not-in-room", error: "Create or join a room first" });
-        return;
-      }
+        await ensureOnlineProfile();
 
-      if (type === "ready") {
-        if (room.phase !== "lobby") return;
-        room.ready.add(ws);
-        broadcastRoomState(room);
-        if (room.players.length === 2 && room.ready.size === 2) startRound(room, false);
-        return;
-      }
-
-      if (type === "early-start") {
-        if (room.phase !== "building" || room.locked || message.roundId !== room.roundId) return;
-        if (message.vote) room.earlyVotes.add(ws);
-        else room.earlyVotes.delete(ws);
-        sendEarlyStartState(room);
-        if (room.earlyVotes.size === 2) lockRound(room, "early");
-        return;
-      }
-
-      if (type === "maze") {
-        if (room.phase !== "building" || !room.locked || message.roundId !== room.roundId) {
-          send(ws, { type: "error", code: "maze-not-expected", error: "That round is not accepting mazes" });
+        if (type === "create") {
+          leaveCurrentRoom();
+          const code = makeRoomCode();
+          const room = makeBaseRoom(code, "friend");
+          rooms.set(code, room);
+          currentRoom = code;
+          send(ws, { type: "created", room: code, slot: 1, profile: publicProfile(profile) });
+          broadcastRoomState(room);
           return;
         }
-        const validated = validateMazePayload(message.payload);
-        if (validated.error) {
-          send(ws, { type: "error", code: "invalid-maze", error: validated.error });
+
+        if (type === "join") {
+          const code = normalizeRoomCode(message.room);
+          const room = rooms.get(code);
+          if (!room || room.mode !== "friend") {
+            send(ws, { type: "error", code: "room-not-found", error: "Friend room not found" });
+            return;
+          }
+          if (room.players.some((candidate) => playerUid(candidate) === identity.uid)) {
+            send(ws, { type: "error", code: "same-account", error: "This profile is already in that room" });
+            return;
+          }
+          if (room.players.length >= 2) {
+            send(ws, { type: "error", code: "room-full", error: "Room is full" });
+            return;
+          }
+          if (room.phase !== "lobby") {
+            send(ws, { type: "error", code: "round-active", error: "That room is already playing" });
+            return;
+          }
+          leaveCurrentRoom();
+          room.players.push(makePlayer(2));
+          currentRoom = code;
+          send(ws, { type: "joined", room: code, slot: 2, profile: publicProfile(profile) });
+          room.players.forEach((candidate) => {
+            if (candidate.ws !== ws) send(candidate.ws, { type: "peer-joined", profile: publicProfile(profile) });
+          });
+          broadcastRoomState(room);
           return;
         }
-        if (!room.submissions.has(ws)) room.submissions.set(ws, validated.value);
+
+        if (type === "party-create") {
+          leaveCurrentRoom();
+          const code = makeRoomCode();
+          const room = makeBaseRoom(code, "party");
+          room.roundsTotal = normalizeRoundCount(message.rounds);
+          room.roundNumber = 0;
+          rooms.set(code, room);
+          currentRoom = code;
+          send(ws, { type: "party-created", room: code, profile: publicProfile(profile) });
+          broadcastRoomState(room);
+          return;
+        }
+
+        if (type === "party-join") {
+          const code = normalizeRoomCode(message.room);
+          const room = rooms.get(code);
+          if (!room || room.mode !== "party") {
+            send(ws, { type: "error", code: "room-not-found", error: "Party room not found" });
+            return;
+          }
+          if (room.players.some((candidate) => playerUid(candidate) === identity.uid)) {
+            send(ws, { type: "error", code: "same-account", error: "This profile is already in that party" });
+            return;
+          }
+          if (room.players.length >= 8) {
+            send(ws, { type: "error", code: "room-full", error: "This party already has eight players" });
+            return;
+          }
+          if (room.phase !== "lobby") {
+            send(ws, { type: "error", code: "round-active", error: "That party has already started" });
+            return;
+          }
+          leaveCurrentRoom();
+          room.players.push(makePlayer(room.players.length + 1));
+          currentRoom = code;
+          send(ws, { type: "party-joined", room: code, profile: publicProfile(profile) });
+          broadcast(room, { type: "party-player-joined", profile: publicProfile(profile) });
+          broadcastRoomState(room);
+          return;
+        }
+
+        const room = currentRoom ? rooms.get(currentRoom) : null;
+        const player = room ? getPlayer(room, ws) : null;
+        if (!room || !player) {
+          send(ws, { type: "error", code: "not-in-room", error: "Create or join a room first" });
+          return;
+        }
+
+        if (room.mode === "party") {
+          if (type === "party-settings") {
+            if (room.players[0] !== player || room.phase !== "lobby") return;
+            room.roundsTotal = normalizeRoundCount(message.rounds);
+            broadcastRoomState(room);
+            return;
+          }
+          if (type === "party-ready") {
+            if (room.phase !== "lobby") return;
+            if (message.ready) room.ready.add(ws);
+            else room.ready.delete(ws);
+            broadcastRoomState(room);
+            return;
+          }
+          if (type === "party-start") {
+            if (room.players[0] !== player || room.phase !== "lobby") return;
+            if (room.players.length < 2 || room.ready.size !== room.players.length) {
+              send(ws, { type: "error", code: "party-not-ready", error: "Every player must be ready before the party starts" });
+              return;
+            }
+            startPartyRound(room, true);
+            return;
+          }
+          if (type === "party-early-start") {
+            if (room.phase !== "building" || room.locked || message.roundId !== room.roundId) return;
+            if (message.vote) room.earlyVotes.add(ws);
+            else room.earlyVotes.delete(ws);
+            broadcastRoomState(room);
+            if (room.earlyVotes.size === room.players.length) lockPartyRound(room, "early");
+            return;
+          }
+          if (type === "party-maze") {
+            if (room.phase !== "building" || !room.locked || message.roundId !== room.roundId) {
+              send(ws, { type: "error", code: "maze-not-expected", error: "That party round is not accepting mazes" });
+              return;
+            }
+            if (!room.submissions.has(ws)) {
+              const validated = validateMazeForSeed(room.seed, message.payload);
+              const payload = { grid: validated.grid, special: validated.special };
+              room.submissions.set(ws, { payload, time: simulateValidatedMaze(validated) });
+            }
+            send(ws, {
+              type: "party-maze-accepted",
+              roundId: room.roundId,
+              submitted: room.submissions.size,
+              required: room.players.length
+            });
+            revealPartyIfReady(room);
+            return;
+          }
+          if (type === "party-next") {
+            if (room.players[0] !== player || room.phase !== "results") return;
+            const complete = room.roundNumber >= room.roundsTotal;
+            if (complete && !message.restart) return;
+            startPartyRound(room, complete && Boolean(message.restart));
+            return;
+          }
+          send(ws, { type: "error", code: "unknown-message", error: "Unknown party message type" });
+          return;
+        }
+
+        if (type === "ready") {
+          if (room.phase !== "lobby") return;
+          room.ready.add(ws);
+          broadcastRoomState(room);
+          if (room.players.length === 2 && room.ready.size === 2) startRound(room, false);
+          return;
+        }
+
+        if (type === "early-start") {
+          if (room.phase !== "building" || room.locked || message.roundId !== room.roundId) return;
+          if (message.vote) room.earlyVotes.add(ws);
+          else room.earlyVotes.delete(ws);
+          sendEarlyStartState(room);
+          if (room.earlyVotes.size === 2) lockRound(room, "early");
+          return;
+        }
+
+        if (type === "maze") {
+          if (room.phase !== "building" || !room.locked || message.roundId !== room.roundId) {
+            send(ws, { type: "error", code: "maze-not-expected", error: "That round is not accepting mazes" });
+            return;
+          }
+          const validated = validateMazePayload(message.payload);
+          if (validated.error) {
+            send(ws, { type: "error", code: "invalid-maze", error: validated.error });
+            return;
+          }
+          if (!room.submissions.has(ws)) room.submissions.set(ws, validated.value);
+          send(ws, {
+            type: "maze-accepted",
+            roundId: room.roundId,
+            submitted: room.submissions.size,
+            required: 2
+          });
+          revealMazesIfReady(room);
+          return;
+        }
+
+        if (type === "rematch") {
+          if (room.phase !== "racing" || message.roundId !== room.roundId) return;
+          const choice = message.choice === "same" || message.choice === "new" ? message.choice : null;
+          if (!choice) return;
+          room.rematchChoices.set(ws, choice);
+          sendRematchState(room);
+          if (room.rematchChoices.size === 2) {
+            const choices = [...room.rematchChoices.values()];
+            if (choices[0] === choices[1]) startRound(room, choices[0] === "same");
+          }
+          return;
+        }
+
+        send(ws, { type: "error", code: "unknown-message", error: "Unknown message type" });
+      } catch (error) {
         send(ws, {
-          type: "maze-accepted",
-          roundId: room.roundId,
-          submitted: room.submissions.size,
-          required: 2
+          type: "error",
+          code: error.code || "server-error",
+          error: error.message || "Unexpected server error"
         });
-        revealMazesIfReady(room);
-        return;
       }
-
-      if (type === "rematch") {
-        if (room.phase !== "racing") return;
-        const choice = message.choice === "same" || message.choice === "new" ? message.choice : null;
-        if (!choice) return;
-        room.rematchChoices.set(ws, choice);
-        sendRematchState(room);
-        if (room.rematchChoices.size === 2) {
-          const choices = [...room.rematchChoices.values()];
-          if (choices[0] === choices[1]) startRound(room, choices[0] === "same");
-        }
-        return;
-      }
-
-      if (type === "leave") {
-        leaveCurrentRoom();
-        return;
-      }
-
-      send(ws, { type: "error", code: "unknown-message", error: "Unknown message type" });
     });
 
     ws.on("close", () => leaveCurrentRoom());

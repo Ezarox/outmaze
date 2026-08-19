@@ -11,7 +11,14 @@ param(
 $ErrorActionPreference = "Stop"
 
 gcloud config set project $ProjectId
-gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com
+gcloud services enable `
+  run.googleapis.com `
+  cloudbuild.googleapis.com `
+  artifactregistry.googleapis.com `
+  firestore.googleapis.com `
+  identitytoolkit.googleapis.com `
+  securetoken.googleapis.com `
+  firebase.googleapis.com
 gcloud run deploy $Service `
   --source . `
   --project $ProjectId `
@@ -23,9 +30,9 @@ gcloud run deploy $Service `
   --concurrency 80 `
   --min-instances 0 `
   --max-instances 1 `
-  --memory 512Mi `
+  --memory 1Gi `
   --cpu 1 `
-  --set-env-vars "NODE_ENV=production,ALLOWED_ORIGINS=https://ezarox.github.io,PUBLIC_SITE_URL=https://ezarox.github.io/outmaze/" `
+  --set-env-vars "NODE_ENV=production,ALLOWED_ORIGINS=https://ezarox.github.io,PUBLIC_SITE_URL=https://ezarox.github.io/outmaze/,FIRESTORE_ENABLED=true,REQUIRE_PROFILES=true,OUTMAZE_PROJECT_ID=$ProjectId" `
   --quiet
 
 gcloud run services describe $Service `
