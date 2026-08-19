@@ -125,17 +125,32 @@
           <input id="vsRoomInput" type="text" placeholder="Room code" maxlength="5" autocomplete="off" autocapitalize="characters" spellcheck="false" />
         </label>
         <button id="vsJoin" class="button button--quiet" type="button">Join room</button>
-        <button id="vsReadyBtn" class="button button--primary hidden" type="button">Ready</button>
+        <button id="vsReadyBtn" class="button button--primary vs-ready-button hidden" type="button">Ready up</button>
       </div>
       <div id="vsMatchActions" class="vs-match-actions hidden">
-        <button id="vsEarlyStartBtn" class="button button--quiet" type="button">Suggest early start</button>
-        <span id="vsEarlyStartStatus">You: — | Opponent: —</span>
+        <button id="vsEarlyStartBtn" class="button button--quiet vs-early-button" type="button" aria-pressed="false">Ready to start early</button>
       </div>
-      <div id="vsRematchActions" class="vs-rematch hidden">
-        <span>Next round:</span>
-        <button id="vsTryAgain" class="button button--quiet" type="button">Modify current maze</button>
-        <button id="vsNewGame" class="button button--quiet" type="button">New seed</button>
-        <span id="vsChoiceStatus"></span>
+      <div id="vsRematchActions" class="vs-rematch hidden" aria-label="Choose the next round">
+        <button id="vsTryAgain" class="button button--quiet vs-choice-button" type="button" aria-pressed="false">
+          <span class="vs-choice-icon" aria-hidden="true">↺</span>
+          <span><strong>Modify maze</strong><small>Keep this seed</small></span>
+        </button>
+        <button id="vsNewGame" class="button button--quiet vs-choice-button" type="button" aria-pressed="false">
+          <span class="vs-choice-icon" aria-hidden="true">✦</span>
+          <span><strong>New seed</strong><small>Fresh environment</small></span>
+        </button>
+        <p id="vsChoiceStatus" class="vs-choice-hint" role="status" aria-live="polite"></p>
+      </div>
+      <div id="vsPlayerStates" class="vs-player-states hidden" role="group" aria-label="Player status" aria-live="polite">
+        <div id="vsSelfState" class="vs-player-state" data-state="waiting">
+          <span class="vs-player-state__signal" aria-hidden="true"></span>
+          <span class="vs-player-state__copy"><strong id="vsSelfStateLabel">You</strong><small id="vsSelfStateText">Waiting</small></span>
+        </div>
+        <span class="vs-player-versus" aria-hidden="true">VS</span>
+        <div id="vsPeerState" class="vs-player-state" data-state="offline">
+          <span class="vs-player-state__signal" aria-hidden="true"></span>
+          <span class="vs-player-state__copy"><strong id="vsPeerStateLabel">Opponent</strong><small id="vsPeerStateText">Waiting to join</small></span>
+        </div>
       </div>
       <button id="vsLeave" class="text-button vs-leave hidden" type="button">Leave room</button>
     </section>

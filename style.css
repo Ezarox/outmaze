@@ -982,16 +982,180 @@ body.vs-mode .resource-toolbar {
   line-height: 1.45;
 }
 
-.vs-match-actions span,
-.vs-rematch > span,
-#vsChoiceStatus {
+.vs-ready-button.is-selected:disabled,
+.vs-early-button.is-selected {
+  border-color: rgba(120, 247, 187, 0.55);
+  background: rgba(63, 228, 154, 0.16);
+  color: var(--mint);
+  opacity: 1;
+  box-shadow: inset 0 0 0 1px rgba(120, 247, 187, 0.08);
+}
+
+.vs-player-states {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-row: 3;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: stretch;
+  gap: 0.55rem;
+  border-top: 1px solid var(--line);
+  padding-top: 0.75rem;
+}
+
+.vs-player-state {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  padding: 0.58rem 0.72rem;
+  background: rgba(255, 255, 255, 0.025);
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+.vs-player-state__signal {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--faint);
+  box-shadow: 0 0 0 4px rgba(110, 130, 121, 0.1);
+}
+
+.vs-player-state__copy {
+  display: grid;
+  min-width: 0;
+  gap: 0.06rem;
+}
+
+.vs-player-state__copy strong {
+  color: var(--text);
+  font-size: 0.75rem;
+}
+
+.vs-player-state__copy small {
+  overflow: hidden;
   color: var(--muted);
-  font-size: 0.72rem;
+  font-size: 0.69rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vs-player-state[data-state="active"] {
+  border-color: rgba(207, 156, 255, 0.34);
+  background: rgba(207, 156, 255, 0.075);
+}
+
+.vs-player-state[data-state="active"] .vs-player-state__signal {
+  background: var(--purple);
+  box-shadow: 0 0 0 4px rgba(207, 156, 255, 0.11);
+}
+
+.vs-player-state[data-state="ready"] {
+  border-color: rgba(120, 247, 187, 0.42);
+  background: rgba(63, 228, 154, 0.095);
+  box-shadow: inset 0 0 0 1px rgba(120, 247, 187, 0.04);
+}
+
+.vs-player-state[data-state="ready"] .vs-player-state__signal {
+  background: var(--mint);
+  box-shadow: 0 0 0 4px rgba(120, 247, 187, 0.13), 0 0 14px rgba(120, 247, 187, 0.24);
+}
+
+.vs-player-state[data-state="selected"] {
+  border-color: rgba(255, 201, 120, 0.38);
+  background: rgba(255, 201, 120, 0.075);
+}
+
+.vs-player-state[data-state="selected"] .vs-player-state__signal {
+  background: var(--amber);
+  box-shadow: 0 0 0 4px rgba(255, 201, 120, 0.11);
+}
+
+.vs-player-state[data-state="warning"] {
+  border-color: rgba(255, 121, 121, 0.45);
+  background: rgba(255, 121, 121, 0.08);
+}
+
+.vs-player-state[data-state="warning"] .vs-player-state__signal {
+  background: var(--danger);
+  box-shadow: 0 0 0 4px rgba(255, 121, 121, 0.11);
+}
+
+.vs-player-state[data-state="offline"] {
+  opacity: 0.72;
+}
+
+.vs-player-versus {
+  align-self: center;
+  color: var(--faint);
+  font: 800 0.62rem ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.12em;
+}
+
+.vs-rematch {
+  display: grid;
+  min-width: min(440px, 48vw);
+  grid-template-columns: repeat(2, minmax(150px, 1fr));
+}
+
+.vs-choice-button {
+  justify-content: flex-start;
+  gap: 0.62rem;
+  padding: 0.62rem 0.78rem;
+  text-align: left;
+}
+
+.vs-choice-button > span:last-child {
+  display: grid;
+  gap: 0.03rem;
+}
+
+.vs-choice-button strong {
+  color: var(--text);
+  font-size: 0.75rem;
+}
+
+.vs-choice-button small {
+  color: var(--faint);
+  font-size: 0.65rem;
+  font-weight: 650;
+}
+
+.vs-choice-icon {
+  color: var(--faint);
+  font-size: 1.05rem;
+}
+
+.vs-choice-button.is-selected {
+  border-color: rgba(255, 201, 120, 0.5);
+  background: rgba(255, 201, 120, 0.1);
+  color: var(--amber);
+  box-shadow: inset 0 0 0 1px rgba(255, 201, 120, 0.06);
+}
+
+.vs-choice-button.is-selected .vs-choice-icon,
+.vs-choice-button.is-selected strong {
+  color: var(--amber);
+}
+
+.vs-rematch.has-mismatch .vs-choice-button.is-selected {
+  border-color: rgba(255, 121, 121, 0.5);
+  background: rgba(255, 121, 121, 0.08);
+}
+
+.vs-choice-hint {
+  grid-column: 1 / -1;
+  margin: 0.06rem 0 0;
+  color: var(--muted);
+  font-size: 0.69rem;
+  text-align: right;
 }
 
 .vs-leave {
   grid-column: 1;
-  grid-row: 3;
+  grid-row: 4;
   justify-self: start;
   align-self: end;
   color: var(--faint);
@@ -1014,6 +1178,34 @@ body.vs-mode .resource-toolbar {
     grid-column: 1;
     grid-row: auto;
     justify-self: stretch;
+  }
+
+  .vs-rematch {
+    min-width: 0;
+  }
+
+  .vs-player-states {
+    grid-column: 1;
+    grid-row: auto;
+  }
+}
+
+@media (max-width: 560px) {
+  .vs-player-states {
+    grid-template-columns: 1fr;
+  }
+
+  .vs-player-versus {
+    display: none;
+  }
+
+  .vs-rematch {
+    grid-template-columns: 1fr;
+  }
+
+  .vs-choice-hint {
+    grid-column: 1;
+    text-align: left;
   }
 }
 

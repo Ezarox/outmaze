@@ -730,7 +730,13 @@ const vsTryAgainBtn = document.getElementById("vsTryAgain");
 const vsNewGameBtn = document.getElementById("vsNewGame");
 const vsChoiceStatus = document.getElementById("vsChoiceStatus");
 const vsEarlyStartBtn = document.getElementById("vsEarlyStartBtn");
-const vsEarlyStartStatus = document.getElementById("vsEarlyStartStatus");
+const vsPlayerStates = document.getElementById("vsPlayerStates");
+const vsSelfState = document.getElementById("vsSelfState");
+const vsPeerState = document.getElementById("vsPeerState");
+const vsSelfStateLabel = document.getElementById("vsSelfStateLabel");
+const vsPeerStateLabel = document.getElementById("vsPeerStateLabel");
+const vsSelfStateText = document.getElementById("vsSelfStateText");
+const vsPeerStateText = document.getElementById("vsPeerStateText");
 const seedControls = [
   document.querySelector(".seed-field"),
   document.getElementById("setSeed"),
@@ -1116,6 +1122,7 @@ function handleVsEvent(evt) {
     state.vs.phase = "lobby";
     state.vs.players = 1;
     state.vs.ready = false;
+    state.vs.readyCount = 0;
     updateVsStatus(`Room ${evt.room} created. Share the code with your opponent.`);
     if (vsRoomInput) vsRoomInput.value = evt.room;
     setVsWaitingTimer();
@@ -1132,6 +1139,7 @@ function handleVsEvent(evt) {
     state.vs.phase = "lobby";
     state.vs.players = 2;
     state.vs.ready = false;
+    state.vs.readyCount = 0;
     updateVsStatus(`Joined room ${evt.room}. Ready up when you're set.`);
     setVsWaitingTimer();
     state.vs.role = "guest";
@@ -1161,6 +1169,7 @@ function handleVsEvent(evt) {
     state.vs.phase = "lobby";
     state.vs.players = 1;
     state.vs.ready = false;
+    state.vs.readyCount = 0;
     state.vs.waitingForStart = true;
     state.vs.opponentMaze = null;
     state.vs.mazeSubmitted = false;
@@ -1193,6 +1202,7 @@ function handleVsEvent(evt) {
     state.vs.opponentMaze = null;
     state.vs.phase = "building";
     state.vs.ready = false;
+    state.vs.readyCount = 0;
     state.vs.lastSeed = useSeed;
     resetVsEarlyStartVotes();
     if (reuseMaze) {
@@ -1278,7 +1288,9 @@ function updateVsPanelState() {
   vsReadyBtn?.classList.toggle("hidden", !lobby);
   if (vsReadyBtn) {
     vsReadyBtn.disabled = state.vs.ready;
-    vsReadyBtn.textContent = state.vs.ready ? "Ready ✓" : "Ready";
+    vsReadyBtn.textContent = state.vs.ready ? "Ready" : "Ready up";
+    vsReadyBtn.classList.toggle("is-selected", state.vs.ready);
+    vsReadyBtn.setAttribute("aria-pressed", String(state.vs.ready));
   }
   vsMatchActions?.classList.toggle("hidden", !building || state.vs.mazeSubmitted);
   vsRematchActions?.classList.toggle("hidden", !showRematch);
@@ -1295,6 +1307,7 @@ function updateVsPanelState() {
   }
   updateEarlyStartControls();
   updateVsChoiceStatus();
+  updateVsPlayerStates();
 }
 
 function stopVsCountdown() {
@@ -2023,18 +2036,17 @@ function sendEarlyStartVote(vote) {
 }
 
 function updateEarlyStartControls() {
-  if (!vsEarlyStartBtn || !vsEarlyStartStatus) return;
+  if (!vsEarlyStartBtn) return;
   const available =
     state.vs.active &&
     state.vs.phase === "building" &&
     !state.vs.locked &&
     !state.vs.mazeSubmitted;
   vsEarlyStartBtn.disabled = !available;
-  vsEarlyStartBtn.textContent = state.vs.earlyStartSelf ? "Withdraw early start" : "Suggest early start";
-  const selfStatus = state.vs.earlyStartSelf ? "Ready" : "—";
-  const peerLabel = state.vs.oppShort || state.vs.oppLabel || "Opponent";
-  const peerStatus = state.vs.earlyStartPeer ? "Ready" : "—";
-  vsEarlyStartStatus.textContent = `${state.vs.selfShort || "You"}: ${selfStatus} | ${peerLabel}: ${peerStatus}`;
+  vsEarlyStartBtn.textContent = state.vs.earlyStartSelf ? "Keep building" : "Ready to start early";
+  vsEarlyStartBtn.classList.toggle("is-selected", state.vs.earlyStartSelf);
+  vsEarlyStartBtn.setAttribute("aria-pressed", String(state.vs.earlyStartSelf));
+  updateVsPlayerStates();
 }
 
 function resetVsEarlyStartVotes() {
@@ -2054,11 +2066,73 @@ function setVsChoice(choice) {
 
 function updateVsChoiceStatus() {
   if (!vsChoiceStatus) return;
-  const label = (choice) => (choice === "same" ? "modify maze" : choice === "new" ? "new seed" : "—");
-  const self = `You: ${label(state.vs.choiceSelf)}`;
-  const peer = `Opponent: ${label(state.vs.choicePeer)}`;
   const mismatch = state.vs.choiceSelf && state.vs.choicePeer && state.vs.choiceSelf !== state.vs.choicePeer;
-  vsChoiceStatus.textContent = `${self} | ${peer}${mismatch ? " · Choose the same option to continue" : ""}`;
+  const matched = state.vs.choiceSelf && state.vs.choiceSelf === state.vs.choicePeer;
+  if (!state.vs.choiceSelf) vsChoiceStatus.textContent = "Choose how you want the room to continue.";
+  else if (!state.vs.choicePeer) vsChoiceStatus.textContent = "Choice saved. Waiting for your opponent…";
+  else if (mismatch) vsChoiceStatus.textContent = "Choose the same option to continue together.";
+  else if (matched) vsChoiceStatus.textContent = "Choices match. Preparing the next round…";
+  else vsChoiceStatus.textContent = "";
+
+  const updateChoiceButton = (button, selected) => {
+    if (!button) return;
+    button.classList.toggle("is-selected", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  };
+  updateChoiceButton(vsTryAgainBtn, state.vs.choiceSelf === "same");
+  updateChoiceButton(vsNewGameBtn, state.vs.choiceSelf === "new");
+  vsRematchActions?.classList.toggle("has-mismatch", Boolean(mismatch));
+  updateVsPlayerStates();
+}
+
+function setVsPlayerState(card, labelEl, textEl, label, text, visualState) {
+  if (!card || !labelEl || !textEl) return;
+  labelEl.textContent = label;
+  textEl.textContent = text;
+  card.dataset.state = visualState;
+  card.setAttribute("aria-label", `${label}: ${text}`);
+}
+
+function updateVsPlayerStates() {
+  if (!vsPlayerStates) return;
+  const inRoom = Boolean(state.vs.room);
+  const lobby = inRoom && state.vs.phase === "lobby";
+  const building = inRoom && state.vs.phase === "building" && !state.vs.mazeSubmitted;
+  const rematch = inRoom && state.vs.phase === "racing" && Boolean(state.race?.finished);
+  const visible = lobby || building || rematch;
+  vsPlayerStates.classList.toggle("hidden", !visible);
+  if (!visible) return;
+
+  let selfText = "Waiting";
+  let peerText = state.vs.players < 2 ? "Waiting to join" : "Not ready";
+  let selfVisual = "waiting";
+  let peerVisual = state.vs.players < 2 ? "offline" : "waiting";
+
+  if (lobby) {
+    const peerReady = state.vs.readyCount > (state.vs.ready ? 1 : 0);
+    selfText = state.vs.ready ? "Ready" : "Not ready";
+    selfVisual = state.vs.ready ? "ready" : "waiting";
+    if (state.vs.players >= 2) {
+      peerText = peerReady ? "Ready" : "Not ready";
+      peerVisual = peerReady ? "ready" : "waiting";
+    }
+  } else if (building) {
+    selfText = state.vs.earlyStartSelf ? "Ready to start" : "Building";
+    peerText = state.vs.earlyStartPeer ? "Ready to start" : "Building";
+    selfVisual = state.vs.earlyStartSelf ? "ready" : "active";
+    peerVisual = state.vs.earlyStartPeer ? "ready" : "active";
+  } else if (rematch) {
+    const choiceLabel = (choice) => (choice === "same" ? "Modify maze" : choice === "new" ? "New seed" : "Choosing…");
+    const mismatch = state.vs.choiceSelf && state.vs.choicePeer && state.vs.choiceSelf !== state.vs.choicePeer;
+    const matched = state.vs.choiceSelf && state.vs.choiceSelf === state.vs.choicePeer;
+    selfText = choiceLabel(state.vs.choiceSelf);
+    peerText = choiceLabel(state.vs.choicePeer);
+    selfVisual = mismatch ? "warning" : matched ? "ready" : state.vs.choiceSelf ? "selected" : "waiting";
+    peerVisual = mismatch ? "warning" : matched ? "ready" : state.vs.choicePeer ? "selected" : "waiting";
+  }
+
+  setVsPlayerState(vsSelfState, vsSelfStateLabel, vsSelfStateText, "You", selfText, selfVisual);
+  setVsPlayerState(vsPeerState, vsPeerStateLabel, vsPeerStateText, "Opponent", peerText, peerVisual);
 }
 
 const AI_ASYNC_YIELD_BUDGET = 1;
