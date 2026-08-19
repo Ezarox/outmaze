@@ -1,11 +1,32 @@
 {
-  "name": "grid-rush-server",
+  "name": "outmaze",
   "version": "1.0.0",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "dependencies": {
-    "ws": "^8.18.3"
+    "ws": "^8.21.3"
   },
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test tests/*.test.js",
+    "benchmark:ai": "node scripts/benchmark-ai.js",
+    "benchmark:human": "node scripts/benchmark-human-seeds.js",
+    "benchmark:pads": "node scripts/benchmark-pad-ai.js",
+    "ai:teacher": "node scripts/ai-lab/generate-teacher-data.js",
+    "ai:solve": "node scripts/ai-lab/solve-seed.js",
+    "ai:report": "node scripts/ai-lab/report-teacher.js",
+    "ai:depth-report": "node scripts/ai-lab/report-depth.js",
+    "ai:overnight": "node scripts/ai-lab/overnight.js",
+    "ai:train": "node scripts/ai-lab/train-policy.js",
+    "ai:evaluate": "node scripts/ai-lab/evaluate-policy.js",
+    "ai:train-sequential": "node scripts/ai-lab/train-sequential-policy.js",
+    "ai:evaluate-sequential": "node scripts/ai-lab/evaluate-sequential-policy.js",
+    "ai:train-value": "node scripts/ai-lab/train-complete-value.js",
+    "ai:evaluate-value": "node scripts/ai-lab/evaluate-complete-value.js",
+    "ai:evaluate-complete": "node scripts/ai-lab/evaluate-complete-search.js",
+    "ai:generate-rollouts": "node scripts/ai-lab/generate-complete-rollouts.js",
+    "ai:benchmark-interdiction": "node scripts/ai-lab/benchmark-interdiction.js"
   }
 }

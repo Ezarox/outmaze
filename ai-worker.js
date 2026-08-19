@@ -22,7 +22,8 @@ self.onmessage = function (evt) {
       profile: { ...(layout.profile || {}), worker: true },
       branchId: layout.branchId,
       branchTotal: layout.branchTotal,
-      branch: layout.branch ?? null
+      branch: layout.branch ?? null,
+      lookaheadUsed: layout.lookaheadUsed || 0
     });
   } catch (err) {
     self.postMessage({ jobId, ok: false, error: err?.message || String(err) });

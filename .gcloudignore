@@ -1,0 +1,13 @@
+.gcloudignore
+.git
+.gitignore
+node_modules
+.npm-cache
+ai-data
+ai-models
+scripts
+tests
+*.md
+*.lines
+diagnostics.txt
+utf-run.ps1

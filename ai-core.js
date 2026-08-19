@@ -15,24 +15,46 @@
   }
 
   // Runner simulation helpers (full fidelity, headless)
-  function createRunner(label, grid, special, neutralSpecials = []) {
-    const path = computePath(grid);
+  function createRunner(label, grid, special, neutralSpecials = [], options = {}) {
+    const path = options.path || options.pathInfo?.path || computePath(grid);
+    const segmentMetadata = computeSegmentMetadata(path);
+    const collectDiagnostics = options.diagnostics !== false;
     return {
       label,
       grid,
       special,
       neutralSpecials: neutralSpecials.map((ns) => (ns ? { ...ns } : null)).filter(Boolean),
       path,
+      initialPath: path,
       segmentIndex: 0,
       segmentProgress: 0,
-      segmentLengths: computeSegmentLengths(path),
+      segmentLengths: segmentMetadata.lengths,
+      segmentDirections: segmentMetadata.directions,
+      segmentSteps: segmentMetadata.steps,
       finished: !path.length,
       resultTime: null,
       worldPos: null,
       elapsedTime: 0,
+      diagnostics: collectDiagnostics ? {
+        padEvents: [],
+        slowActiveTime: 0,
+        slowStackTime: 0,
+        fastActiveTime: 0,
+        fastStackTime: 0,
+        stoneActiveTime: 0,
+        stoneActiveDistance: 0,
+        ownedHazardTime: 0,
+        slowHazardOverlapTime: 0,
+        stoneHazardOverlapTime: 0,
+        speedHazardOverlapTime: 0,
+        detourReverseDistance: 0,
+        rewindPrefixTime: 0
+      } : null,
       effects: {
         slowTimer: 0,
         fastTimer: 0,
+        slowTimers: [],
+        fastTimers: [],
         areaTimer: 0,
         speedMultiplier: 1,
         gravityActive: false,
@@ -56,12 +78,16 @@
       return;
     }
     updateRunnerEffects(runner, delta);
+    const activeSlowCount = runner.effects.slowTimers.length;
+    const activeFastCount = runner.effects.fastTimers.length;
+    const activeStone = runner.effects.medusaActive;
     const speed = NPC_SPEED * runner.effects.speedMultiplier;
     let remainingDistance = speed * delta;
     let timeConsumed = 0;
+    let distanceMoved = 0;
     while (remainingDistance > 0 && runner.segmentIndex < runner.segmentLengths.length) {
-      const dirVector = segmentDirectionVector(runner.path, runner.segmentIndex);
-      const dirStep = segmentStep(runner.path, runner.segmentIndex);
+      const dirVector = runner.segmentDirections[runner.segmentIndex] || null;
+      const dirStep = runner.segmentSteps[runner.segmentIndex] || null;
       if (dirVector) {
         runner.effects.lastDir = dirVector;
         runner.effects.lastStep = dirStep;
@@ -76,10 +102,12 @@
       if (remainingDistance < segmentRemaining) {
         runner.segmentProgress += remainingDistance;
         timeConsumed += remainingDistance / speed;
+        distanceMoved += remainingDistance;
         remainingDistance = 0;
       } else {
         remainingDistance -= segmentRemaining;
         timeConsumed += segmentRemaining / speed;
+        distanceMoved += segmentRemaining;
         runner.segmentIndex++;
         runner.segmentProgress = 0;
         triggerPanelForRunner(runner);
@@ -87,11 +115,30 @@
     }
     runner.worldPos = runnerWorldPosition(runner);
     checkPanelUnderRunner(runner);
-    updateSpecialArea(runner, delta);
-    updateNeutralSpecialEffects(runner, delta);
+    if (runner.special?.placed) updateSpecialArea(runner, delta);
+    if (runner.neutralSpecials?.length) updateNeutralSpecialEffects(runner, delta);
     const finishedThisFrame = runner.segmentIndex >= runner.segmentLengths.length;
     const frameContribution = finishedThisFrame ? Math.min(timeConsumed, delta) : delta;
     runner.elapsedTime += frameContribution;
+    const diagnostics = runner.diagnostics;
+    if (diagnostics && frameContribution > 0) {
+      if (activeSlowCount > 0) diagnostics.slowActiveTime += frameContribution;
+      if (activeSlowCount > 1) diagnostics.slowStackTime += frameContribution;
+      if (activeFastCount > 0) diagnostics.fastActiveTime += frameContribution;
+      if (activeFastCount > 1) diagnostics.fastStackTime += frameContribution;
+      if (activeStone) {
+        diagnostics.stoneActiveTime += frameContribution;
+        diagnostics.stoneActiveDistance += distanceMoved;
+      }
+      const position = runner.worldPos || runnerWorldPosition(runner);
+      const insideOwned = runner.special?.placed && isPointInsideSpecial(position, runner.special);
+      if (insideOwned) {
+        diagnostics.ownedHazardTime += frameContribution;
+        if (activeSlowCount > 0) diagnostics.slowHazardOverlapTime += frameContribution;
+        if (activeFastCount > 0) diagnostics.speedHazardOverlapTime += frameContribution;
+        if (activeStone) diagnostics.stoneHazardOverlapTime += frameContribution;
+      }
+    }
     updatePadEffectStates(runner);
     if (finishedThisFrame) {
       runner.finished = true;
@@ -143,20 +190,34 @@
 
   function updateRunnerEffects(runner, delta) {
     const effects = runner.effects;
-    if (effects.slowTimer > 0) effects.slowTimer = Math.max(0, effects.slowTimer - delta);
+    if (!effects.slowTimers.length && effects.slowTimer > 0) effects.slowTimers.push(effects.slowTimer);
+    let writeIndex = 0;
+    for (let index = 0; index < effects.slowTimers.length; index++) {
+      const timer = Math.max(0, effects.slowTimers[index] - delta);
+      if (timer > 0) effects.slowTimers[writeIndex++] = timer;
+    }
+    effects.slowTimers.length = writeIndex;
+    if (!effects.fastTimers.length && effects.fastTimer > 0) effects.fastTimers.push(effects.fastTimer);
+    writeIndex = 0;
+    for (let index = 0; index < effects.fastTimers.length; index++) {
+      const timer = Math.max(0, effects.fastTimers[index] - delta);
+      if (timer > 0) effects.fastTimers[writeIndex++] = timer;
+    }
+    effects.fastTimers.length = writeIndex;
+    effects.slowTimer = effects.slowTimers.length ? Math.max(...effects.slowTimers) : 0;
+    effects.fastTimer = effects.fastTimers.length ? Math.max(...effects.fastTimers) : 0;
     if (effects.stunTimer > 0) effects.stunTimer = Math.max(0, effects.stunTimer - delta);
     if (effects.neutralSlowTimer > 0) effects.neutralSlowTimer = Math.max(0, effects.neutralSlowTimer - delta);
     if (effects.stunTimer > 0) {
       runner.effects.speedMultiplier = 0;
       return;
     }
-    if (effects.fastTimer > 0) effects.fastTimer = Math.max(0, effects.fastTimer - delta);
     const specialType = runner.special?.type;
     if (effects.areaTimer > 0 && specialType !== "radius") {
       effects.areaTimer = Math.max(0, effects.areaTimer - delta);
     }
     let mult = 1;
-    if (effects.slowTimer > 0) mult *= PANEL_SLOW_MULT;
+    if (effects.slowTimers.length) mult *= Math.pow(PANEL_SLOW_MULT, effects.slowTimers.length);
     if (specialType === "radius") {
       if (effects.areaTimer > 0) {
         const ratio = Math.min(1, effects.areaTimer / FREEZING_BUILDUP);
@@ -167,7 +228,11 @@
       mult *= SPECIAL_SLOW_MULT;
     }
     if (effects.neutralSlowTimer > 0) mult *= SPECIAL_SLOW_MULT;
-    if (effects.fastTimer > 0) mult *= PANEL_FAST_MULT;
+    if (effects.fastTimers.length) mult *= Math.pow(PANEL_FAST_MULT, effects.fastTimers.length);
+    if (effects.medusaActive) mult *= MEDUSA_SLOW_MULT;
+    if (effects.gravityActive && effects.gravityPull) {
+      mult *= pressureFieldMultiplier(effects.gravityPull.distance);
+    }
     runner.effects.speedMultiplier = mult;
   }
 
@@ -218,15 +283,23 @@
     if (!isPadActiveCell(value)) return;
     const padType = padTypeFromCell(value);
     runner.grid[y][x] = padUsedVariant(value);
+    const event = { type: padType, x, y, time: runner.elapsedTime };
+    runner.diagnostics?.padEvents.push(event);
     if (padType === "speed") {
+      runner.effects.fastTimers.push(PANEL_EFFECT_DURATION);
       runner.effects.fastTimer = PANEL_EFFECT_DURATION;
     } else if (padType === "slow") {
+      runner.effects.slowTimers.push(PANEL_EFFECT_DURATION);
       runner.effects.slowTimer = PANEL_EFFECT_DURATION;
     } else if (padType === "detour") {
-      triggerDetourPad(runner, x, y);
+      event.reverseDistance = triggerDetourPad(runner, x, y);
+      if (runner.diagnostics) runner.diagnostics.detourReverseDistance += event.reverseDistance || 0;
     } else if (padType === "stone") {
       triggerStonePad(runner);
+      event.direction = runner.effects.medusaDir ? { ...runner.effects.medusaDir } : null;
     } else if (padType === "rewind") {
+      event.prefixTime = runner.elapsedTime;
+      if (runner.diagnostics) runner.diagnostics.rewindPrefixTime += runner.elapsedTime;
       triggerRewindPad(runner);
     }
     updateRunnerEffects(runner, 0);
@@ -250,7 +323,10 @@
   function applyRunnerPath(runner, newPath) {
     if (!newPath.length) return;
     runner.path = newPath;
-    runner.segmentLengths = computeSegmentLengths(newPath);
+    const segmentMetadata = computeSegmentMetadata(newPath);
+    runner.segmentLengths = segmentMetadata.lengths;
+    runner.segmentDirections = segmentMetadata.directions;
+    runner.segmentSteps = segmentMetadata.steps;
     runner.segmentIndex = 0;
     runner.segmentProgress = 0;
     runner.worldPos = runnerWorldPosition(runner);
@@ -266,10 +342,10 @@
 
   function triggerDetourPad(runner, x, y) {
     const lastStep = runner.effects.lastStep || segmentStep(runner.path, runner.segmentIndex);
-    if (!lastStep) return;
+    if (!lastStep) return 0;
     const stepX = -lastStep.x;
     const stepY = -lastStep.y;
-    if (stepX === 0 && stepY === 0) return;
+    if (stepX === 0 && stepY === 0) return 0;
     const forced = [{ x, y }];
     let currentX = x;
     let currentY = y;
@@ -282,13 +358,14 @@
       currentX = nextX;
       currentY = nextY;
     }
-    if (forced.length < 2) return;
+    if (forced.length < 2) return 0;
     const finalCell = forced[forced.length - 1];
     const onward = computePathFromCell(runner.grid, finalCell);
-    if (!onward.length) return;
+    if (!onward.length) return 0;
     const tail = onward.slice(1);
     const newPath = forced.concat(tail);
     applyRunnerPath(runner, newPath);
+    return forced.length - 1;
   }
 
   function triggerStonePad(runner) {
@@ -302,6 +379,8 @@
     applyRunnerPath(runner, restart);
     runner.effects.fastTimer = 0;
     runner.effects.slowTimer = 0;
+    runner.effects.fastTimers = [];
+    runner.effects.slowTimers = [];
     runner.effects.neutralSlowTimer = 0;
     runner.effects.areaTimer = 0;
     runner.effects.medusaActive = false;
@@ -324,11 +403,10 @@
       const dx = centerX - pos.x;
       const dy = centerY - pos.y;
       const dist = Math.hypot(dx, dy);
-      if (dist <= SPECIAL_RADIUS) {
+      if (dist <= GRAVITY_RADIUS) {
         runner.effects.gravityActive = true;
-        const norm = dist === 0 ? 0 : 1 / dist;
-        runner.effects.gravityPull = { x: dx * norm, y: dy * norm, distance: dist };
-        runner.effects.gravityOffset = { x: dx * norm * 0.15, y: dy * norm * 0.15 };
+        runner.effects.gravityPull = { distance: dist };
+        runner.effects.gravityOffset = null;
       } else {
         runner.effects.gravityActive = false;
         runner.effects.gravityPull = null;
@@ -351,12 +429,14 @@
     }
     if (special.type === "lightning") {
       special.cooldown = Math.max(0, (special.cooldown || 0) - delta);
+      special.flashTimer = Math.max(0, (special.flashTimer || 0) - delta);
       const centerX = special.cell.x + 0.5;
       const centerY = special.cell.y + 0.5;
       const dist = Math.hypot(centerX - pos.x, centerY - pos.y);
       if (dist <= LIGHTNING_EFFECT_RADIUS + 0.35 && special.cooldown <= 0 && runner.effects.stunTimer <= 0) {
         runner.effects.stunTimer = LIGHTNING_STUN;
         special.cooldown = LIGHTNING_COOLDOWN;
+        special.flashTimer = 0.3;
       }
       runner.effects.areaTimer = 0;
       return;
@@ -375,18 +455,20 @@
     const pos = runner.worldPos || runnerWorldPosition(runner);
     list.forEach((special) => {
       special.cooldown = Math.max(0, (special.cooldown || 0) - delta);
+      special.flashTimer = Math.max(0, (special.flashTimer || 0) - delta);
       if (special.effectTimer > 0) special.effectTimer = Math.max(0, special.effectTimer - delta);
       if (!special.cell) return;
       if (special.type === "lightning") {
         if (special.cooldown <= 0 && isPointInsideSpecial(pos, special) && runner.effects.stunTimer <= 0) {
           runner.effects.stunTimer = LIGHTNING_STUN;
           special.cooldown = LIGHTNING_COOLDOWN;
+          special.flashTimer = 0.3;
         }
         return;
       }
       if (special.type === "row" || special.type === "column") {
         if (isPointInsideSpecial(pos, special)) {
-          runner.effects.neutralSlowTimer = PANEL_EFFECT_DURATION;
+          runner.effects.neutralSlowTimer = SPECIAL_LINGER;
         }
       }
     });
@@ -398,7 +480,8 @@
     if (special.type === "radius" || special.type === "gravity" || special.type === "lightning") {
       const dx = pos.x - (x + 0.5);
       const dy = pos.y - (y + 0.5);
-      return Math.hypot(dx, dy) <= SPECIAL_RADIUS;
+      const radius = special.type === "gravity" ? GRAVITY_RADIUS : SPECIAL_RADIUS;
+      return dx * dx + dy * dy <= radius * radius;
     }
     if (special.type === "row") return pos.y >= y && pos.y <= y + 1;
     if (special.type === "column") return pos.x >= x && pos.x <= x + 1;
@@ -452,6 +535,7 @@
   const PANEL_FAST_MULT = 1.5;
   const MEDUSA_SLOW_MULT = 0.3;
   const SPECIAL_RADIUS = 4;
+  const GRAVITY_RADIUS = 6;
   const SPECIAL_LINGER = 3;
   const SPECIAL_SLOW_MULT = 0.7;
   const FREEZING_BUILDUP = 10;
@@ -459,8 +543,21 @@
   const LIGHTNING_STUN = 1.5;
   const LIGHTNING_COOLDOWN = 3.25;
   const LIGHTNING_EFFECT_RADIUS = 4;
-  const GRAVITY_MIN_MULT = 0.4;
-  const GRAVITY_MAX_MULT = 0.7;
+  const GRAVITY_MIN_MULT = 0.15;
+  const GRAVITY_MAX_MULT = 0.85;
+  const GRAVITY_CURVE_EXPONENT = 1.8;
+
+  function pressureFieldMultiplier(distance) {
+    const ratio = Math.max(0, Math.min(1, distance / GRAVITY_RADIUS));
+    const curvedRatio = Math.pow(ratio, GRAVITY_CURVE_EXPONENT);
+    return GRAVITY_MIN_MULT + (GRAVITY_MAX_MULT - GRAVITY_MIN_MULT) * curvedRatio;
+  }
+
+  function nowMs() {
+    return typeof performance !== "undefined" && typeof performance.now === "function"
+      ? performance.now()
+      : Date.now();
+  }
   const AI_PATH_WEIGHT = 12;
   const PAD_SLOW_EXTRA_TIME = PANEL_EFFECT_DURATION * (1 / PANEL_SLOW_MULT - 1);
   const PAD_SPEED_TIME_DELTA = PANEL_EFFECT_DURATION * (1 - 1 / PANEL_FAST_MULT);
@@ -525,8 +622,10 @@
     slowInteraction: 0.05,
     blockUsage: 3,
     lightningPadPenalty: 1.5,
-    beamCrossings: 2.5
+    beamCrossings: 2.5,
+    speedExposure: 0
   };
+  let activeGenerationMetrics = null;
 
   // Utility helpers
   const CARDINAL_NEIGHBORS = [
@@ -545,7 +644,12 @@
   }
 
   function cloneGrid(grid) {
+    if (activeGenerationMetrics) activeGenerationMetrics.gridClones++;
     return grid.map((row) => row.slice());
+  }
+
+  function createEmptyGrid() {
+    return Array.from({ length: GRID_SIZE }, () => Array(GRID_SIZE).fill(CELL_EMPTY));
   }
 
   function randomInt(rng, min, max) {
@@ -602,55 +706,141 @@
     return Math.hypot(gx - x, gy - y);
   }
 
-  function findPath(grid, start, goal) {
-    const open = [
-      {
-        x: start.x,
-        y: start.y,
-        g: 0,
-        f: heuristic(start.x, start.y, goal.x, goal.y)
-      }
-    ];
-    const cameFrom = new Map();
-    const gScore = new Map([[key(start.x, start.y), 0]]);
-    const closed = new Set();
-
-    while (open.length) {
-      open.sort((a, b) => a.f - b.f);
-      const current = open.shift();
-      const cKey = key(current.x, current.y);
-      if (closed.has(cKey)) continue;
-      closed.add(cKey);
-      if (current.x === goal.x && current.y === goal.y) {
-        return reconstructPath(cameFrom, current);
-      }
-      for (const move of MOVES) {
-        const nx = current.x + move.dx;
-        const ny = current.y + move.dy;
-        if (!isInsideGrid(nx, ny)) continue;
-        if (!isWalkableCell(grid, nx, ny)) continue;
-        if (move.diagonal && !canPassDiagonal(grid, current.x, current.y, move.dx, move.dy)) continue;
-        const nk = key(nx, ny);
-        const tentativeG = current.g + move.cost;
-        if (tentativeG >= (gScore.get(nk) ?? Infinity)) continue;
-        cameFrom.set(nk, cKey);
-        gScore.set(nk, tentativeG);
-        open.push({ x: nx, y: ny, g: tentativeG, f: tentativeG + heuristic(nx, ny, goal.x, goal.y) });
-      }
-    }
-    return [];
+  const PATH_CELL_COUNT = GRID_SIZE * GRID_SIZE;
+  const PATH_HEAP_CAPACITY = PATH_CELL_COUNT * MOVES.length * 2 + 1;
+  const pathGScore = new Float64Array(PATH_CELL_COUNT);
+  const pathParents = new Int16Array(PATH_CELL_COUNT);
+  const pathClosed = new Uint8Array(PATH_CELL_COUNT);
+  const pathHeapIds = new Int16Array(PATH_HEAP_CAPACITY);
+  const pathHeapG = new Float64Array(PATH_HEAP_CAPACITY);
+  const pathHeapF = new Float64Array(PATH_HEAP_CAPACITY);
+  const pathHeapOrder = new Uint32Array(PATH_HEAP_CAPACITY);
+  const pathExitHeuristic = new Float64Array(PATH_CELL_COUNT);
+  for (let id = 0; id < PATH_CELL_COUNT; id++) {
+    const x = id % GRID_SIZE;
+    const y = Math.floor(id / GRID_SIZE);
+    pathExitHeuristic[id] = heuristic(x, y, ENTRANCE_X, 0);
   }
 
-  function reconstructPath(cameFrom, current) {
-    const path = [current];
-    let keyPtr = key(current.x, current.y);
-    while (cameFrom.has(keyPtr)) {
-      const prevKey = cameFrom.get(keyPtr);
-      const [px, py] = prevKey.split(",").map(Number);
-      path.unshift({ x: px, y: py });
-      keyPtr = prevKey;
+  function runPathSearch(grid, start, goal, reconstruct = true) {
+    if (activeGenerationMetrics) activeGenerationMetrics.pathSearches++;
+    pathGScore.fill(Infinity);
+    pathParents.fill(-1);
+    pathClosed.fill(0);
+    let heapSize = 0;
+    let insertionOrder = 0;
+    let poppedId = -1;
+    let poppedG = 0;
+
+    function comesBefore(left, right) {
+      return (
+        pathHeapF[left] < pathHeapF[right] ||
+        (pathHeapF[left] === pathHeapF[right] && pathHeapOrder[left] < pathHeapOrder[right])
+      );
     }
-    return path;
+
+    function swapHeap(left, right) {
+      let integer = pathHeapIds[left];
+      pathHeapIds[left] = pathHeapIds[right];
+      pathHeapIds[right] = integer;
+      let number = pathHeapG[left];
+      pathHeapG[left] = pathHeapG[right];
+      pathHeapG[right] = number;
+      number = pathHeapF[left];
+      pathHeapF[left] = pathHeapF[right];
+      pathHeapF[right] = number;
+      integer = pathHeapOrder[left];
+      pathHeapOrder[left] = pathHeapOrder[right];
+      pathHeapOrder[right] = integer;
+    }
+
+    function pushOpen(id, g, f) {
+      if (heapSize >= PATH_HEAP_CAPACITY) return false;
+      let index = heapSize++;
+      pathHeapIds[index] = id;
+      pathHeapG[index] = g;
+      pathHeapF[index] = f;
+      pathHeapOrder[index] = insertionOrder++;
+      while (index > 0) {
+        const parent = (index - 1) >> 1;
+        if (!comesBefore(index, parent)) break;
+        swapHeap(index, parent);
+        index = parent;
+      }
+      return true;
+    }
+
+    function popOpen() {
+      poppedId = pathHeapIds[0];
+      poppedG = pathHeapG[0];
+      heapSize--;
+      if (heapSize > 0) {
+        pathHeapIds[0] = pathHeapIds[heapSize];
+        pathHeapG[0] = pathHeapG[heapSize];
+        pathHeapF[0] = pathHeapF[heapSize];
+        pathHeapOrder[0] = pathHeapOrder[heapSize];
+        let index = 0;
+        while (true) {
+          const left = index * 2 + 1;
+          const right = left + 1;
+          let smallest = index;
+          if (left < heapSize && comesBefore(left, smallest)) smallest = left;
+          if (right < heapSize && comesBefore(right, smallest)) smallest = right;
+          if (smallest === index) break;
+          swapHeap(index, smallest);
+          index = smallest;
+        }
+      }
+    }
+
+    const startId = start.y * GRID_SIZE + start.x;
+    const goalId = goal.y * GRID_SIZE + goal.x;
+    const usesExitHeuristic = goal.x === ENTRANCE_X && goal.y === 0;
+    pathGScore[startId] = 0;
+    pushOpen(
+      startId,
+      0,
+      usesExitHeuristic ? pathExitHeuristic[startId] : heuristic(start.x, start.y, goal.x, goal.y)
+    );
+
+    while (heapSize > 0) {
+      popOpen();
+      if (pathClosed[poppedId]) continue;
+      pathClosed[poppedId] = 1;
+      if (activeGenerationMetrics) activeGenerationMetrics.pathNodesExpanded++;
+      if (poppedId === goalId) {
+        if (!reconstruct) return true;
+        const path = [];
+        let id = goalId;
+        while (id >= 0) {
+          path.push({ x: id % GRID_SIZE, y: Math.floor(id / GRID_SIZE) });
+          id = pathParents[id];
+        }
+        path.reverse();
+        return path;
+      }
+      const currentX = poppedId % GRID_SIZE;
+      const currentY = Math.floor(poppedId / GRID_SIZE);
+      for (const move of MOVES) {
+        const nx = currentX + move.dx;
+        const ny = currentY + move.dy;
+        if (!isInsideGrid(nx, ny) || !isWalkableCell(grid, nx, ny)) continue;
+        if (move.diagonal && !canPassDiagonal(grid, currentX, currentY, move.dx, move.dy)) continue;
+        const nextId = ny * GRID_SIZE + nx;
+        const tentativeG = poppedG + move.cost;
+        if (tentativeG >= pathGScore[nextId]) continue;
+        pathParents[nextId] = poppedId;
+        pathGScore[nextId] = tentativeG;
+        const remaining = usesExitHeuristic ? pathExitHeuristic[nextId] : heuristic(nx, ny, goal.x, goal.y);
+        if (!pushOpen(nextId, tentativeG, tentativeG + remaining)) return null;
+      }
+    }
+    return reconstruct ? [] : false;
+  }
+
+  function findPath(grid, start, goal) {
+    const path = runPathSearch(grid, start, goal, true);
+    return Array.isArray(path) ? path : [];
   }
 
   function extendWithEntrances(path) {
@@ -677,17 +867,32 @@
   }
 
   function hasPath(grid) {
-    return computePath(grid).length > 0;
+    const start = { x: ENTRANCE_X, y: GRID_SIZE - 1 };
+    const goal = { x: ENTRANCE_X, y: 0 };
+    return runPathSearch(grid, start, goal, false) === true;
   }
 
   function computeSegmentLengths(path) {
     const lengths = [];
-    for (let i = 0; i < path.length - 1; i++) {
-      const start = centerOf(path[i]);
-      const end = centerOf(path[i + 1]);
-      lengths.push(Math.hypot(end.x - start.x, end.y - start.y));
+    for (let index = 0; index < path.length - 1; index++) {
+      lengths.push(Math.hypot(path[index + 1].x - path[index].x, path[index + 1].y - path[index].y));
     }
     return lengths;
+  }
+
+  function computeSegmentMetadata(path) {
+    const lengths = [];
+    const directions = [];
+    const steps = [];
+    for (let i = 0; i < path.length - 1; i++) {
+      const dx = path[i + 1].x - path[i].x;
+      const dy = path[i + 1].y - path[i].y;
+      const length = Math.hypot(dx, dy);
+      lengths.push(length);
+      directions.push(length > 0 ? { x: dx / length, y: dy / length } : null);
+      steps.push(length > 0 ? { x: Math.sign(dx), y: Math.sign(dy) } : null);
+    }
+    return { lengths, directions, steps };
   }
 
   function computePadScore(grid, path) {
@@ -756,6 +961,7 @@
     const beamCross = computeBeamCrossings(info.path, special) * aiWeights.beamCrossings;
     const blockUsage = computeBlockUsageScore(grid, info.path, baseGridForUsage) * aiWeights.blockUsage;
     const detourDistance = computeDetourDistance(grid, info) * aiWeights.slowInteraction;
+    const speedExposurePenalty = computeSpeedExposurePenalty(grid, info) * (aiWeights.speedExposure || 0);
 
     return (
       info.totalDistance * AI_PATH_WEIGHT +
@@ -769,7 +975,8 @@
       lightningPenalty +
       beamCross +
       blockUsage +
-      detourDistance
+      detourDistance -
+      speedExposurePenalty
     );
   }
 
@@ -1025,8 +1232,8 @@
   }
 
   // Candidate search
-  function collectSpeedPadSteerCells(grid) {
-    const path = computePath(grid);
+  function collectSpeedPadSteerCells(grid, pathOverride = null) {
+    const path = pathOverride || computePath(grid);
     if (!path.length) return [];
     const cells = new Set();
     path.forEach((node) => {
@@ -1052,10 +1259,11 @@
     limit = COMBO_POOL_LIMIT,
     aiWeights = AI_WEIGHT_DEFAULTS,
     baseGrid = null,
-    rng = null
+    rng = null,
+    pathInfoOverride = null
   ) {
     const results = [];
-    const basePath = computePath(grid);
+    const basePath = pathInfoOverride?.path || computePath(grid);
     if (!basePath.length) return results;
     const candidateKeys = new Set();
     basePath.forEach((node) => {
@@ -1092,9 +1300,10 @@
     forcedCells = null,
     limit = COMBO_POOL_LIMIT,
     aiWeights = AI_WEIGHT_DEFAULTS,
-    baseGrid = null
+    baseGrid = null,
+    pathInfoOverride = null
   ) {
-    const basePath = computePath(grid);
+    const basePath = pathInfoOverride?.path || computePath(grid);
     if (!basePath.length) return [];
     const singleCandidates = new Set();
     function addSingle(x, y) {
@@ -1159,7 +1368,9 @@
     singlePool,
     budgetInfo,
     aiWeights = AI_WEIGHT_DEFAULTS,
-    baseGrid = null
+    baseGrid = null,
+    pathInfoOverride = null,
+    currentScore = null
   ) {
     if (!budgetInfo) return null;
     const wallsLeft = budgetInfo.wallsLeft || 0;
@@ -1178,8 +1389,10 @@
       Math.min(COMBO_LOOKAHEAD_DEPTH, wallsLeft + singlesLeft + (special?.placed ? 0 : 1))
     );
 
-    function dfs(currentGrid, currentSpecial, wLeft, sLeft, depth, firstMoveUsed, usedSpecial) {
-      const score = evaluateGridForAi(currentGrid, currentSpecial, neutralSpecials, null, aiWeights, baseGrid);
+    function dfs(currentGrid, currentSpecial, wLeft, sLeft, depth, firstMoveUsed, usedSpecial, knownScore = null) {
+      const score = Number.isFinite(knownScore)
+        ? knownScore
+        : evaluateGridForAi(currentGrid, currentSpecial, neutralSpecials, null, aiWeights, baseGrid);
       if (depth === 0 || (!wLeft && !sLeft && (usedSpecial || currentSpecial?.placed))) {
         if (!best || score > best.score) {
           best = { score, candidate: firstMoveUsed };
@@ -1236,7 +1449,12 @@
 
     const startGrid = cloneGrid(grid);
     const startSpecial = special ? cloneSpecial(special) : { placed: false };
-    dfs(startGrid, startSpecial, wallsLeft, singlesLeft, maxDepth, null, !!special?.placed);
+    const initialScore = Number.isFinite(currentScore)
+      ? currentScore
+      : pathInfoOverride
+        ? evaluateGridForAi(startGrid, startSpecial, neutralSpecials, pathInfoOverride, aiWeights, baseGrid)
+        : null;
+    dfs(startGrid, startSpecial, wallsLeft, singlesLeft, maxDepth, null, !!special?.placed, initialScore);
     return best;
   }
 
@@ -1300,12 +1518,30 @@
   ) {
     const candidateLimit = COMBO_POOL_LIMIT;
     const wallPool = allowWalls
-      ? findTopAiWallCandidates(grid, special, neutralSpecials, candidateLimit, aiWeights, baseGrid, fallbackRng)
+      ? findTopAiWallCandidates(
+          grid,
+          special,
+          neutralSpecials,
+          candidateLimit,
+          aiWeights,
+          baseGrid,
+          fallbackRng,
+          pathInfoOverride
+        )
       : [];
-    const steerCells = collectSpeedPadSteerCells(grid);
+    const steerCells = collectSpeedPadSteerCells(grid, pathInfoOverride?.path);
     const forced = forcedSingleCells && forcedSingleCells.length ? forcedSingleCells.concat(steerCells) : steerCells;
     const singlePool = allowSingles
-      ? findTopAiSingleCandidates(grid, special, neutralSpecials, forced, candidateLimit, aiWeights, baseGrid)
+      ? findTopAiSingleCandidates(
+          grid,
+          special,
+          neutralSpecials,
+          forced,
+          candidateLimit,
+          aiWeights,
+          baseGrid,
+          pathInfoOverride
+        )
       : [];
     let candidates = wallPool.concat(singlePool);
     if (!candidates.length) {
@@ -1336,7 +1572,9 @@
       singlePool,
       effectiveBudget,
       aiWeights,
-      baseGrid
+      baseGrid,
+      pathInfoOverride,
+      currentScore
     );
     if (seq?.candidate) return seq.candidate;
     return candidates[0] || null;
@@ -1494,7 +1732,186 @@
     special.flashTimer = 0;
   }
 
-  // AI build (simplified)
+  // Deterministic round generation
+  function createNeutralSpecial(type, cell) {
+    return {
+      type,
+      placed: true,
+      cell: { ...cell },
+      effectTimer: 0,
+      cooldown: 0,
+      flashTimer: 0,
+      neutral: true
+    };
+  }
+
+  function pickSpecialType(rng, excludedTypes = []) {
+    const excluded = new Set(excludedTypes);
+    const weighted = [
+      ["radius", 0.25],
+      ["lightning", 0.25],
+      ["gravity", 0.25],
+      ["row", 0.125],
+      ["column", 0.125]
+    ].filter(([type]) => !excluded.has(type));
+    const total = weighted.reduce((sum, [, weight]) => sum + weight, 0);
+    let roll = rng() * total;
+    for (const [type, weight] of weighted) {
+      roll -= weight;
+      if (roll <= 0) return type;
+    }
+    return weighted[weighted.length - 1]?.[0] || "radius";
+  }
+
+  function shuffleWithRng(items, rng) {
+    for (let i = items.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      [items[i], items[j]] = [items[j], items[i]];
+    }
+    return items;
+  }
+
+  function countBlocks(grid, type) {
+    let total = 0;
+    for (let y = 0; y < GRID_SIZE; y++) {
+      for (let x = 0; x < GRID_SIZE; x++) {
+        if (grid[y][x] === type) total++;
+      }
+    }
+    return Math.floor(total / 4);
+  }
+
+  function countCells(grid, type) {
+    if (!grid) return 0;
+    let total = 0;
+    for (let y = 0; y < GRID_SIZE; y++) {
+      for (let x = 0; x < GRID_SIZE; x++) {
+        if (grid[y][x] === type) total++;
+      }
+    }
+    return total;
+  }
+
+  function placeStaticBlocks(grid, rng) {
+    const blockCount = randomInt(rng, 8, 18);
+    let attempts = 0;
+    while (attempts < blockCount * 6 && countBlocks(grid, CELL_STATIC) < blockCount) {
+      const x = randomInt(rng, 0, GRID_SIZE - 2);
+      const y = randomInt(rng, 2, GRID_SIZE - 4);
+      if (Math.abs(x - ENTRANCE_X) <= 2) {
+        attempts++;
+        continue;
+      }
+      if (canPlaceBlock(grid, x, y)) placeBlock(grid, x, y, CELL_STATIC);
+      attempts++;
+    }
+  }
+
+  function maybeUpgradePad(grid, cell, rng, baseType) {
+    const chance = baseType === "slow" ? 0.15 : 0.01;
+    if (rng() > chance) return;
+    const options = [CELL_DETOUR, CELL_STONE, CELL_REWIND];
+    grid[cell.y][cell.x] = options[Math.floor(rng() * options.length)];
+  }
+
+  function placePowerPanels(grid, rng) {
+    const candidates = [];
+    for (let y = 1; y < GRID_SIZE - 1; y++) {
+      for (let x = 0; x < GRID_SIZE; x++) {
+        if (grid[y][x] === CELL_EMPTY && Math.abs(x - ENTRANCE_X) > 1) candidates.push({ x, y });
+      }
+    }
+    shuffleWithRng(candidates, rng);
+    for (let i = 0; i < 4 && candidates.length; i++) {
+      const cell = candidates.shift();
+      grid[cell.y][cell.x] = CELL_SPEED;
+      maybeUpgradePad(grid, cell, rng, "speed");
+    }
+    for (let i = 0; i < 2 && candidates.length; i++) {
+      const cell = candidates.shift();
+      grid[cell.y][cell.x] = CELL_SLOW;
+      maybeUpgradePad(grid, cell, rng, "slow");
+    }
+  }
+
+  function placeNeutralSpecial(grid, rng) {
+    const roll = rng();
+    if (roll < 0.25) return null;
+    const type = roll < 0.5 ? "lightning" : roll < 0.75 ? "row" : "column";
+    const cells = [];
+    for (let y = 1; y < GRID_SIZE - 1; y++) {
+      for (let x = 0; x < GRID_SIZE; x++) {
+        if (grid[y][x] === CELL_EMPTY && Math.abs(x - ENTRANCE_X) > 1) cells.push({ x, y });
+      }
+    }
+    shuffleWithRng(cells, rng);
+    for (const cell of cells) {
+      grid[cell.y][cell.x] = CELL_STATIC_SPECIAL;
+      ensureOpenings(grid);
+      if (hasPath(grid)) return createNeutralSpecial(type, cell);
+      grid[cell.y][cell.x] = CELL_EMPTY;
+    }
+    return null;
+  }
+
+  function generateBaseGrid(rng) {
+    let attempts = 0;
+    while (attempts < 200) {
+      const grid = createEmptyGrid();
+      placeStaticBlocks(grid, rng);
+      placePowerPanels(grid, rng);
+      ensureOpenings(grid);
+      const neutralSpecial = placeNeutralSpecial(grid, rng);
+      if (hasPath(grid)) return { grid, neutralSpecial };
+      attempts++;
+    }
+    const grid = createEmptyGrid();
+    ensureOpenings(grid);
+    return { grid, neutralSpecial: null };
+  }
+
+  function createRound(seed) {
+    const startedAt = nowMs();
+    const safeSeed = `${seed ?? ""}`.trim() || "0";
+    const rng = mulberry32(hashSeed(safeSeed));
+    const base = generateBaseGrid(rng);
+    const coinBudget = randomInt(rng, 10, 21);
+    const singleBudget = rng() < 0.1 ? 2 : 1;
+    const hasNeutralLightning = base.neutralSpecial?.type === "lightning";
+    const specialType = pickSpecialType(rng, hasNeutralLightning ? ["lightning"] : []);
+    return {
+      seed: safeSeed,
+      rng,
+      baseGrid: base.grid,
+      neutralSpecial: base.neutralSpecial,
+      coinBudget,
+      singleBudget,
+      specialTemplate: createSpecialTemplate(specialType),
+      metrics: { generationMs: nowMs() - startedAt }
+    };
+  }
+
+  function resetPadStates(grid) {
+    if (!grid) return grid;
+    for (let y = 0; y < GRID_SIZE; y++) {
+      for (let x = 0; x < GRID_SIZE; x++) {
+        const value = grid[y][x];
+        if (value === CELL_SPEED_USED) grid[y][x] = CELL_SPEED;
+        else if (value === CELL_SLOW_USED) grid[y][x] = CELL_SLOW;
+        else if (value === CELL_DETOUR_USED) grid[y][x] = CELL_DETOUR;
+        else if (value === CELL_STONE_USED) grid[y][x] = CELL_STONE;
+        else if (value === CELL_REWIND_USED) grid[y][x] = CELL_REWIND;
+      }
+    }
+    return grid;
+  }
+
+  function advanceBuildClock(timeLeft, delta) {
+    const remaining = Math.max(0, Number(timeLeft || 0) - Math.max(0, Number(delta || 0)));
+    return { timeLeft: remaining, expired: remaining <= 0 };
+  }
+
+  // AI build
   function createSpecialTemplate(type) {
     return {
       type,
@@ -1506,7 +1923,2181 @@
     };
   }
 
+  const AI_VERSION = "3.4.0";
+  const AI_SEARCH_PROFILE = Object.freeze({
+    name: "hard",
+    beamWidth: 4,
+    candidatesPerState: 12,
+    hazardCandidates: 12,
+    candidateBudget: 1300,
+    finalistLimit: 12,
+    maxBuildMs: 2200,
+    finalistRank: 0
+  });
+
+  function resolveAiSearchProfile(snapshot = {}) {
+    const base = AI_SEARCH_PROFILE;
+    const overrides = snapshot.aiSearchLimits || {};
+    return {
+      ...base,
+      beamWidth: Math.max(1, Math.min(10, overrides.beamWidth ?? base.beamWidth)),
+      candidatesPerState: Math.max(4, Math.min(32, overrides.candidatesPerState ?? base.candidatesPerState)),
+      hazardCandidates: Math.max(4, Math.min(30, overrides.hazardCandidates ?? base.hazardCandidates)),
+      candidateBudget: Math.max(40, Math.min(4000, overrides.candidateBudget ?? base.candidateBudget)),
+      finalistLimit: Math.max(1, Math.min(16, overrides.finalistLimit ?? base.finalistLimit)),
+      maxBuildMs: Math.max(100, Math.min(5000, overrides.maxBuildMs ?? base.maxBuildMs))
+    };
+  }
+
+  function gridSearchSignature(grid) {
+    return grid.map((row) => row.map((value) => value.toString(16)).join("")).join("");
+  }
+
+  function compareSearchEntries(a, b) {
+    const scoreDelta = (b?.score ?? -Infinity) - (a?.score ?? -Infinity);
+    if (Math.abs(scoreDelta) > 1e-9) return scoreDelta;
+    return String(a?.signature || "").localeCompare(String(b?.signature || ""));
+  }
+
+  function addHazardCandidate(candidates, grid, x, y) {
+    if (!isInsideGrid(x, y) || !isCellAvailableForSpecial(grid, x, y)) return;
+    candidates.set(keyFor(x, y), { x, y });
+  }
+
+  function hazardCoverageScore(type, cell, path, grid, neutralSpecials) {
+    let coverage = 0;
+    let blocksRoute = 0;
+    for (const node of path || []) {
+      if (!isInsideGrid(node.x, node.y)) continue;
+      const dx = Math.abs(node.x - cell.x);
+      const dy = Math.abs(node.y - cell.y);
+      const distance = Math.hypot(dx, dy);
+      if (dx === 0 && dy === 0) blocksRoute = 1;
+      if (type === "row" && node.y === cell.y) coverage += 1;
+      else if (type === "column" && node.x === cell.x) coverage += 1;
+      else if (type === "gravity" && distance <= GRAVITY_RADIUS + 1) {
+        coverage += Math.pow(1 - Math.min(1, distance / (GRAVITY_RADIUS + 1)), 1.35);
+      } else if ((type === "radius" || type === "lightning") && distance <= SPECIAL_RADIUS + 1) {
+        coverage += 1 - Math.min(1, distance / (SPECIAL_RADIUS + 1));
+      }
+    }
+    let padSynergy = 0;
+    for (let y = 0; y < GRID_SIZE; y++) {
+      for (let x = 0; x < GRID_SIZE; x++) {
+        const padType = padTypeFromCell(grid[y][x]);
+        if (padType !== "slow" && padType !== "stone" && padType !== "rewind") continue;
+        const distance = Math.hypot(x - cell.x, y - cell.y);
+        if (distance <= (type === "gravity" ? GRAVITY_RADIUS : SPECIAL_RADIUS) + 1) {
+          padSynergy += 1 / (1 + distance);
+        }
+      }
+    }
+    let overlap = 0;
+    for (const neutral of neutralSpecials || []) {
+      if (!neutral?.cell) continue;
+      const distance = Math.hypot(neutral.cell.x - cell.x, neutral.cell.y - cell.y);
+      if (distance <= SPECIAL_RADIUS * 1.5) overlap += 1 / (1 + distance);
+    }
+    return coverage * 10 + padSynergy * 6 + overlap * 5 + blocksRoute * 3;
+  }
+
+  function collectHazardCandidateCells(grid, pathInfo, specialType, neutralSpecials, limit) {
+    const candidates = new Map();
+    const path = pathInfo?.path || [];
+    for (const node of path) {
+      if (!isInsideGrid(node.x, node.y)) continue;
+      addHazardCandidate(candidates, grid, node.x, node.y);
+      for (const move of MOVES) {
+        addHazardCandidate(candidates, grid, node.x + move.dx, node.y + move.dy);
+      }
+    }
+    for (let y = 0; y < GRID_SIZE; y++) {
+      for (let x = 0; x < GRID_SIZE; x++) {
+        const padType = padTypeFromCell(grid[y][x]);
+        if (padType !== "slow" && padType !== "stone" && padType !== "rewind") continue;
+        for (const [dx, dy] of CARDINAL_NEIGHBORS) {
+          addHazardCandidate(candidates, grid, x + dx, y + dy);
+        }
+      }
+    }
+    for (const neutral of neutralSpecials || []) {
+      if (!neutral?.cell) continue;
+      for (const move of MOVES) {
+        addHazardCandidate(candidates, grid, neutral.cell.x + move.dx, neutral.cell.y + move.dy);
+      }
+    }
+    if (!candidates.size) {
+      for (let y = 1; y < GRID_SIZE - 1; y++) {
+        for (let x = 0; x < GRID_SIZE; x++) addHazardCandidate(candidates, grid, x, y);
+      }
+    }
+    return Array.from(candidates.values())
+      .map((cell) => ({
+        ...cell,
+        preliminary: hazardCoverageScore(specialType, cell, path, grid, neutralSpecials),
+        key: keyFor(cell.x, cell.y)
+      }))
+      .sort((a, b) => b.preliminary - a.preliminary || a.key.localeCompare(b.key))
+      .slice(0, limit);
+  }
+
+  function routeBarrierContact(grid, path) {
+    if (!path?.length) return 0;
+    let contact = 0;
+    const seen = new Set();
+    for (const node of path) {
+      if (!isInsideGrid(node.x, node.y)) continue;
+      for (const [dx, dy] of CARDINAL_NEIGHBORS) {
+        const x = node.x + dx;
+        const y = node.y + dy;
+        if (!isInsideGrid(x, y)) continue;
+        const value = grid[y][x];
+        if (value !== CELL_STATIC && value !== CELL_PLAYER && value !== CELL_SINGLE) continue;
+        const entry = keyFor(x, y);
+        if (seen.has(entry)) continue;
+        seen.add(entry);
+        contact++;
+      }
+    }
+    return contact;
+  }
+
+  function existingStructureContact(baseGrid, path) {
+    if (!baseGrid || !path?.length) return 0;
+    let contact = 0;
+    const seen = new Set();
+    for (const node of path) {
+      if (!isInsideGrid(node.x, node.y)) continue;
+      for (const [dx, dy] of CARDINAL_NEIGHBORS) {
+        const x = node.x + dx;
+        const y = node.y + dy;
+        if (!isInsideGrid(x, y) || baseGrid[y][x] !== CELL_STATIC) continue;
+        const entry = keyFor(x, y);
+        if (seen.has(entry)) continue;
+        seen.add(entry);
+        contact++;
+      }
+    }
+    return contact;
+  }
+
+  function evaluateHazardPlan(grid, specialType, neutralSpecials, cell, baseGrid, aiWeights) {
+    if (!cell || !isCellAvailableForSpecial(grid, cell.x, cell.y)) return null;
+    const plannedGrid = cloneGrid(grid);
+    plannedGrid[cell.y][cell.x] = CELL_SPECIAL;
+    ensureOpenings(plannedGrid);
+    const pathInfo = analyzePath(plannedGrid);
+    if (!pathInfo) return null;
+    const special = createSpecialTemplate(specialType);
+    special.placed = true;
+    special.cell = { x: cell.x, y: cell.y };
+    const predicted = estimatePredictedRunTime(plannedGrid, pathInfo, special, neutralSpecials);
+    const contact = routeBarrierContact(plannedGrid, pathInfo.path);
+    const weightedScore = evaluateGridForAi(plannedGrid, special, neutralSpecials, pathInfo, aiWeights, baseGrid);
+    const score = predicted.time * 100 + contact * 0.45 + weightedScore * 0.002;
+    return { grid: plannedGrid, special, pathInfo, predicted, contact, score };
+  }
+
+  function findBestHazardPlan(grid, specialType, neutralSpecials, baseGrid, aiWeights, limit, profile) {
+    const openPath = analyzePath(grid);
+    if (!openPath) return null;
+    const candidates = collectHazardCandidateCells(grid, openPath, specialType, neutralSpecials, limit);
+    let best = null;
+    for (const cell of candidates) {
+      const evaluated = evaluateHazardPlan(grid, specialType, neutralSpecials, cell, baseGrid, aiWeights);
+      profile.hazardEvaluations++;
+      if (!evaluated) continue;
+      evaluated.signature = keyFor(cell.x, cell.y);
+      if (!best || compareSearchEntries(evaluated, best) < 0) best = evaluated;
+    }
+    return best;
+  }
+
+  function candidateTouchesCell(candidate, cell) {
+    if (!cell) return false;
+    if (candidate.type === "single") return candidate.x === cell.x && candidate.y === cell.y;
+    return cell.x >= candidate.x && cell.x <= candidate.x + 1 && cell.y >= candidate.y && cell.y <= candidate.y + 1;
+  }
+
+  function candidateBarrierAdjacency(grid, candidate) {
+    const cells = candidate.type === "wall"
+      ? [
+          [candidate.x, candidate.y],
+          [candidate.x + 1, candidate.y],
+          [candidate.x, candidate.y + 1],
+          [candidate.x + 1, candidate.y + 1]
+        ]
+      : [[candidate.x, candidate.y]];
+    const own = new Set(cells.map(([x, y]) => keyFor(x, y)));
+    const seen = new Set();
+    for (const [cx, cy] of cells) {
+      for (const [dx, dy] of CARDINAL_NEIGHBORS) {
+        const x = cx + dx;
+        const y = cy + dy;
+        if (!isInsideGrid(x, y) || own.has(keyFor(x, y))) continue;
+        const value = grid[y][x];
+        if (value !== CELL_STATIC && value !== CELL_PLAYER && value !== CELL_SINGLE) continue;
+        seen.add(keyFor(x, y));
+      }
+    }
+    return seen.size;
+  }
+
+  function minimumCandidatePathDistance(candidate, path) {
+    let best = Infinity;
+    const cx = candidate.type === "wall" ? candidate.x + 0.5 : candidate.x;
+    const cy = candidate.type === "wall" ? candidate.y + 0.5 : candidate.y;
+    for (const node of path || []) {
+      if (!isInsideGrid(node.x, node.y)) continue;
+      best = Math.min(best, Math.hypot(node.x - cx, node.y - cy));
+    }
+    return best;
+  }
+
+  function placementPreliminaryScore(grid, candidate, path, reservedSpecial) {
+    if (candidateTouchesCell(candidate, reservedSpecial?.cell)) return -Infinity;
+    let blocksPath = 0;
+    for (const node of path || []) {
+      if (!isInsideGrid(node.x, node.y)) continue;
+      if (candidate.type === "single") {
+        if (node.x === candidate.x && node.y === candidate.y) blocksPath++;
+      } else if (
+        node.x >= candidate.x &&
+        node.x <= candidate.x + 1 &&
+        node.y >= candidate.y &&
+        node.y <= candidate.y + 1
+      ) {
+        blocksPath++;
+      }
+    }
+    const pathDistance = minimumCandidatePathDistance(candidate, path);
+    const adjacency = candidateBarrierAdjacency(grid, candidate);
+    const centreBias = 1 - Math.abs(candidate.y - (GRID_SIZE - 1) / 2) / GRID_SIZE;
+    return blocksPath * 80 + adjacency * 8 + 12 / (1 + pathDistance) + centreBias;
+  }
+
+  function candidateFocusBonus(candidate, focusCells) {
+    if (!focusCells?.length) return 0;
+    const cx = candidate.type === "wall" ? candidate.x + 0.5 : candidate.x;
+    const cy = candidate.type === "wall" ? candidate.y + 0.5 : candidate.y;
+    let distance = Infinity;
+    for (const cell of focusCells) distance = Math.min(distance, Math.hypot(cell.x - cx, cell.y - cy));
+    return 40 / (1 + distance);
+  }
+
+  function collectPlacementCandidates(grid, pathInfo, reservedSpecial, wallsLeft, singlesLeft, limit, focusCells = []) {
+    const path = pathInfo?.path || [];
+    const wallKeys = new Set();
+    const singleKeys = new Set();
+    for (const node of path) {
+      if (!isInsideGrid(node.x, node.y)) continue;
+      for (let dy = -2; dy <= 1; dy++) {
+        for (let dx = -2; dx <= 1; dx++) wallKeys.add(keyFor(node.x + dx, node.y + dy));
+      }
+      singleKeys.add(keyFor(node.x, node.y));
+      for (const [dx, dy] of CARDINAL_NEIGHBORS) singleKeys.add(keyFor(node.x + dx, node.y + dy));
+    }
+    for (const focus of focusCells) {
+      for (let dy = -3; dy <= 2; dy++) {
+        for (let dx = -3; dx <= 2; dx++) wallKeys.add(keyFor(focus.x + dx, focus.y + dy));
+      }
+      singleKeys.add(keyFor(focus.x, focus.y));
+      for (const move of MOVES) singleKeys.add(keyFor(focus.x + move.dx, focus.y + move.dy));
+    }
+    const walls = [];
+    if (wallsLeft > 0) {
+      for (const entry of wallKeys) {
+        const [x, y] = entry.split(",").map(Number);
+        if (!canPlaceBlock(grid, x, y)) continue;
+        const candidate = { type: "wall", x, y, key: `w:${entry}` };
+        candidate.preliminary =
+          placementPreliminaryScore(grid, candidate, path, reservedSpecial) + candidateFocusBonus(candidate, focusCells);
+        if (Number.isFinite(candidate.preliminary)) walls.push(candidate);
+      }
+      walls.sort((a, b) => b.preliminary - a.preliminary || a.key.localeCompare(b.key));
+    }
+    const singles = [];
+    if (singlesLeft > 0) {
+      for (const entry of singleKeys) {
+        const [x, y] = entry.split(",").map(Number);
+        if (!canPlaceSingle(grid, x, y)) continue;
+        const candidate = { type: "single", x, y, key: `s:${entry}` };
+        candidate.preliminary =
+          placementPreliminaryScore(grid, candidate, path, reservedSpecial) + candidateFocusBonus(candidate, focusCells);
+        if (Number.isFinite(candidate.preliminary)) singles.push(candidate);
+      }
+      singles.sort((a, b) => b.preliminary - a.preliminary || a.key.localeCompare(b.key));
+    }
+    const singleSlots = singlesLeft > 0 ? Math.max(2, Math.floor(limit * 0.28)) : 0;
+    const wallSlots = wallsLeft > 0 ? Math.max(0, limit - Math.min(singleSlots, singles.length)) : 0;
+    return walls.slice(0, wallSlots).concat(singles.slice(0, singleSlots));
+  }
+
+  function applySearchPlacement(grid, candidate) {
+    if (candidate.type === "wall") placeBlock(grid, candidate.x, candidate.y, CELL_PLAYER);
+    else grid[candidate.y][candidate.x] = CELL_SINGLE;
+    ensureOpenings(grid);
+  }
+
+  function makePlacementOrderEntry(candidate) {
+    return { type: candidate.type, row: candidate.y + 1, column: candidate.x + 1, specialHotspots: [] };
+  }
+
+  function evaluateSearchGrid(grid, context, preferredSpecial, replan) {
+    const signature = gridSearchSignature(grid);
+    const preferredKey = preferredSpecial?.cell ? keyFor(preferredSpecial.cell.x, preferredSpecial.cell.y) : "none";
+    const cacheKey = `${signature}|${replan ? "plan" : preferredKey}`;
+    if (context.cache.has(cacheKey)) {
+      context.profile.cacheHits++;
+      return context.cache.get(cacheKey);
+    }
+    let evaluation = null;
+    if (!replan && preferredSpecial?.cell) {
+      evaluation = evaluateHazardPlan(
+        grid,
+        context.specialType,
+        context.neutralSpecials,
+        preferredSpecial.cell,
+        context.baseGrid,
+        context.aiWeights
+      );
+      context.profile.hazardEvaluations++;
+    }
+    if (!evaluation) {
+      evaluation = findBestHazardPlan(
+        grid,
+        context.specialType,
+        context.neutralSpecials,
+        context.baseGrid,
+        context.aiWeights,
+        context.limits.hazardCandidates,
+        context.profile
+      );
+    }
+    if (evaluation) {
+      evaluation.signature = signature;
+      context.cache.set(cacheKey, evaluation);
+    }
+    return evaluation;
+  }
+
+  function addSearchArchive(archive, state) {
+    if (!state?.evaluation) return;
+    const keyValue = state.signature;
+    const existing = archive.get(keyValue);
+    if (!existing || state.score > existing.score) archive.set(keyValue, state);
+  }
+
+  function materializeSearchFinalist(state, context) {
+    const planned = findBestHazardPlan(
+      state.grid,
+      context.specialType,
+      context.neutralSpecials,
+      context.baseGrid,
+      context.aiWeights,
+      Math.min(30, context.limits.hazardCandidates + 6),
+      context.profile
+    );
+    if (!planned) return null;
+    const simulationStarted = nowMs();
+    const simulatedTime = simulateRunnerTime(planned.grid, planned.special, context.neutralSpecials, {
+      pathInfo: planned.pathInfo
+    });
+    context.profile.simulationMs += nowMs() - simulationStarted;
+    context.profile.exactSimulations++;
+    if (!Number.isFinite(simulatedTime)) return null;
+    const placementOrder = state.placementOrder.map((entry) => ({ ...entry }));
+    placementOrder.push({
+      type: "special",
+      row: planned.special.cell.y + 1,
+      column: planned.special.cell.x + 1,
+      specialCell: { ...planned.special.cell },
+      specialHotspots: []
+    });
+    return {
+      grid: planned.grid,
+      special: planned.special,
+      placementOrder,
+      simulatedTime,
+      heuristicScore: state.score,
+      structureContacts: planned.contact,
+      existingStructureContacts: existingStructureContact(context.baseGrid, planned.pathInfo.path),
+      wallsUsed: state.wallsUsed,
+      singlesUsed: state.singlesUsed
+    };
+  }
+
+  function removeSearchPlacement(grid, entry) {
+    const x = entry.column - 1;
+    const y = entry.row - 1;
+    if (entry.type === "wall") clearBlock(grid, x, y);
+    else if (entry.type === "single") grid[y][x] = CELL_EMPTY;
+    ensureOpenings(grid);
+  }
+
+  function refineFinalLayout(best, context) {
+    const maxPasses = context.limits.name === "hard" ? 4 : 2;
+    let changed = 0;
+    let evaluations = 0;
+    annotatePlacementImpacts(best.grid, best.special, context.neutralSpecials, best.placementOrder);
+    for (let pass = 0; pass < maxPasses; pass++) {
+      const weakestPlacements = best.placementOrder
+        .filter((entry) => entry.type === "wall" || entry.type === "single")
+        .sort((a, b) => (a.impactDelta ?? 0) - (b.impactDelta ?? 0))
+        .slice(0, 3);
+      if (!weakestPlacements.length) break;
+      let replacement = null;
+      for (const weakest of weakestPlacements) {
+        const withoutWeakest = cloneGrid(best.grid);
+        removeSearchPlacement(withoutWeakest, weakest);
+        const pathInfo = analyzePath(withoutWeakest);
+        if (!pathInfo) continue;
+        const candidates = collectPlacementCandidates(
+          withoutWeakest,
+          pathInfo,
+          best.special,
+          Number(weakest.type === "wall"),
+          Number(weakest.type === "single"),
+          context.limits.name === "hard" ? 18 : 12
+        ).filter((candidate) => candidate.type === weakest.type);
+        for (const candidate of candidates) {
+          const nextGrid = cloneGrid(withoutWeakest);
+          applySearchPlacement(nextGrid, candidate);
+          const simulatedTime = simulateRunnerTime(nextGrid, best.special, context.neutralSpecials);
+          evaluations++;
+          if (!Number.isFinite(simulatedTime) || simulatedTime <= best.simulatedTime + 0.025) continue;
+          if (!replacement || simulatedTime > replacement.simulatedTime) {
+            replacement = { candidate, grid: nextGrid, simulatedTime, entry: weakest };
+          }
+        }
+      }
+      if (!replacement) break;
+      best.grid = replacement.grid;
+      best.simulatedTime = replacement.simulatedTime;
+      replacement.entry.row = replacement.candidate.y + 1;
+      replacement.entry.column = replacement.candidate.x + 1;
+      replacement.entry.impactDelta = null;
+      changed++;
+      annotatePlacementImpacts(best.grid, best.special, context.neutralSpecials, best.placementOrder);
+    }
+    const pathInfo = analyzePath(best.grid);
+    if (pathInfo) {
+      best.structureContacts = routeBarrierContact(best.grid, pathInfo.path);
+      best.existingStructureContacts = existingStructureContact(context.baseGrid, pathInfo.path);
+    }
+    return { changed, evaluations };
+  }
+
+  function padRefinementFocusCells(analysis) {
+    const cells = [];
+    const seen = new Set();
+    function add(x, y) {
+      if (!isInsideGrid(x, y)) return;
+      const signature = keyFor(x, y);
+      if (seen.has(signature)) return;
+      seen.add(signature);
+      cells.push({ x, y });
+    }
+    for (const opportunity of analysis.modes.slice(0, 3)) {
+      for (const target of opportunity.targets) {
+        add(target.x, target.y);
+        if ((opportunity.mode === "stone" || opportunity.mode === "detour") && target.bestRay) {
+          const direction = opportunity.mode === "stone"
+            ? { dx: target.bestRay.dx, dy: target.bestRay.dy }
+            : { dx: -target.bestRay.dx, dy: -target.bestRay.dy };
+          for (let step = 1; step <= 5; step++) add(target.x + direction.dx * step, target.y + direction.dy * step);
+        }
+      }
+    }
+    return cells;
+  }
+
+  function refinePadAwareLayout(best, context, analysis) {
+    const weakestWalls = best.placementOrder
+      .filter((entry) => entry.type === "wall")
+      .sort((a, b) => (a.impactDelta ?? 0) - (b.impactDelta ?? 0))
+      .slice(0, 3);
+    const focusCells = padRefinementFocusCells(analysis);
+    let replacement = null;
+    let evaluations = 0;
+    for (let firstIndex = 0; firstIndex < weakestWalls.length; firstIndex++) {
+      for (let secondIndex = firstIndex + 1; secondIndex < weakestWalls.length; secondIndex++) {
+        const firstEntry = weakestWalls[firstIndex];
+        const secondEntry = weakestWalls[secondIndex];
+        const reducedGrid = cloneGrid(best.grid);
+        removeSearchPlacement(reducedGrid, firstEntry);
+        removeSearchPlacement(reducedGrid, secondEntry);
+        const reducedPath = analyzePath(reducedGrid);
+        if (!reducedPath) continue;
+        const firstCandidates = collectPlacementCandidates(
+          reducedGrid,
+          reducedPath,
+          best.special,
+          2,
+          0,
+          10,
+          focusCells
+        )
+          .filter((candidate) => candidate.type === "wall")
+          .slice(0, 5);
+        for (const firstCandidate of firstCandidates) {
+          const firstGrid = cloneGrid(reducedGrid);
+          applySearchPlacement(firstGrid, firstCandidate);
+          const firstPath = analyzePath(firstGrid);
+          if (!firstPath) continue;
+          const secondCandidates = collectPlacementCandidates(
+            firstGrid,
+            firstPath,
+            best.special,
+            1,
+            0,
+            7,
+            focusCells
+          )
+            .filter((candidate) => candidate.type === "wall")
+            .slice(0, 3);
+          for (const secondCandidate of secondCandidates) {
+            const grid = cloneGrid(firstGrid);
+            applySearchPlacement(grid, secondCandidate);
+            const outcome = simulateRunnerOutcome(grid, best.special, context.neutralSpecials);
+            evaluations++;
+            if (!outcome || outcome.time <= best.simulatedTime + 0.025) continue;
+            if (!replacement || outcome.time > replacement.simulatedTime + 1e-9) {
+              replacement = {
+                grid,
+                simulatedTime: outcome.time,
+                diagnostics: outcome.diagnostics,
+                firstEntry,
+                secondEntry,
+                firstCandidate,
+                secondCandidate
+              };
+            }
+          }
+        }
+      }
+    }
+    let changed = 0;
+    if (replacement) {
+      best.grid = replacement.grid;
+      best.simulatedTime = replacement.simulatedTime;
+      replacement.firstEntry.row = replacement.firstCandidate.y + 1;
+      replacement.firstEntry.column = replacement.firstCandidate.x + 1;
+      replacement.firstEntry.impactDelta = null;
+      replacement.secondEntry.row = replacement.secondCandidate.y + 1;
+      replacement.secondEntry.column = replacement.secondCandidate.x + 1;
+      replacement.secondEntry.impactDelta = null;
+      changed++;
+    }
+    const rawGrid = cloneGrid(best.grid);
+    if (best.special?.cell) rawGrid[best.special.cell.y][best.special.cell.x] = CELL_EMPTY;
+    ensureOpenings(rawGrid);
+    const hazardPlan = findBestExactHazardPlan(
+      rawGrid,
+      context.specialType,
+      context.neutralSpecials,
+      context.baseGrid,
+      24,
+      context.profile
+    );
+    if (hazardPlan) {
+      evaluations += 24;
+      if (hazardPlan.simulatedTime > best.simulatedTime + 0.025) {
+        best.grid = hazardPlan.grid;
+        best.special = hazardPlan.special;
+        best.simulatedTime = hazardPlan.simulatedTime;
+        const specialEntry = best.placementOrder.find((entry) => entry.type === "special");
+        if (specialEntry) {
+          specialEntry.row = hazardPlan.special.cell.y + 1;
+          specialEntry.column = hazardPlan.special.cell.x + 1;
+          specialEntry.specialCell = { ...hazardPlan.special.cell };
+        }
+        changed++;
+      }
+    }
+    annotatePlacementImpacts(best.grid, best.special, context.neutralSpecials, best.placementOrder);
+    const pathInfo = analyzePath(best.grid);
+    if (pathInfo) {
+      best.structureContacts = routeBarrierContact(best.grid, pathInfo.path);
+      best.existingStructureContacts = existingStructureContact(context.baseGrid, pathInfo.path);
+    }
+    return { changed, evaluations };
+  }
+
+  function buildRouteRolloutFromSnapshot(snapshot, options = {}) {
+    const startedAt = nowMs();
+    const maxBuildMs = Math.max(100, options.maxBuildMs || 1800);
+    const deterministicBudget = options.deterministicBudget === true;
+    const specialPlacementDepth = Math.max(0, options.specialPlacementDepth ?? 0);
+    const relocateAtEnd = options.relocateAtEnd !== false;
+    const aiWeights = { ...AI_WEIGHT_DEFAULTS, ...(snapshot.aiWeights || {}) };
+    const baseGrid = cloneGrid(snapshot.baseGrid);
+    const neutralSpecials = cloneNeutralSpecials(snapshot.baseNeutralSpecials || []);
+    const profile = { hazardEvaluations: 0 };
+    let grid = baseGrid;
+    let special = createSpecialTemplate(snapshot.specialTemplate?.type || "radius");
+    let wallsLeft = Math.max(0, snapshot.coinBudget | 0);
+    let singlesLeft = Math.max(0, snapshot.singleBudget | 0);
+    const placementOrder = [];
+    const rng = mulberry32(snapshot.rngSeed >>> 0);
+    let placementsMade = 0;
+    function placePlannedSpecial(candidateLimit = 12) {
+      if (special.placed) return true;
+      const plan = findBestHazardPlan(
+        grid,
+        special.type,
+        neutralSpecials,
+        snapshot.baseGrid,
+        aiWeights,
+        candidateLimit,
+        profile
+      );
+      if (!plan) return false;
+      grid = plan.grid;
+      special = plan.special;
+      return true;
+    }
+    if (specialPlacementDepth === 0 && !placePlannedSpecial()) return null;
+    while (
+      (wallsLeft > 0 || singlesLeft > 0) &&
+      (deterministicBudget || nowMs() - startedAt < maxBuildMs)
+    ) {
+      if (!special.placed && placementsMade >= specialPlacementDepth && !placePlannedSpecial()) break;
+      const pathInfo = analyzePath(grid);
+      if (!pathInfo) break;
+      const chosen = findBestAiPlacement(
+        grid,
+        evaluateGridForAi(grid, special, neutralSpecials, pathInfo, aiWeights, snapshot.baseGrid),
+        special,
+        neutralSpecials,
+        pathInfo,
+        { wallsLeft, singlesLeft, specialHotspots: [] },
+        wallsLeft > 0,
+        singlesLeft > 0,
+        null,
+        aiWeights,
+        snapshot.baseGrid,
+        rng
+      );
+      if (!chosen || chosen.type === "special") break;
+      applySearchPlacement(grid, chosen);
+      placementOrder.push(makePlacementOrderEntry(chosen));
+      if (chosen.type === "wall") wallsLeft--;
+      else singlesLeft--;
+      placementsMade++;
+    }
+    if (!special.placed && !placePlannedSpecial(18)) return null;
+    let finalPlan = { grid, special };
+    if (relocateAtEnd) {
+      const rawGrid = cloneGrid(grid);
+      if (special.cell) rawGrid[special.cell.y][special.cell.x] = CELL_EMPTY;
+      ensureOpenings(rawGrid);
+      finalPlan = findBestHazardPlan(
+        rawGrid,
+        special.type,
+        neutralSpecials,
+        snapshot.baseGrid,
+        aiWeights,
+        18,
+        profile
+      );
+      if (!finalPlan) return null;
+    }
+    const simulatedTime = simulateRunnerTime(finalPlan.grid, finalPlan.special, neutralSpecials, {
+      pathInfo: finalPlan.pathInfo
+    });
+    placementOrder.push({
+      type: "special",
+      row: finalPlan.special.cell.y + 1,
+      column: finalPlan.special.cell.x + 1,
+      specialCell: { ...finalPlan.special.cell },
+      specialHotspots: []
+    });
+    return {
+      grid: finalPlan.grid,
+      special: finalPlan.special,
+      placementOrder,
+      simulatedTime,
+      totalMs: nowMs() - startedAt,
+      wallsUsed: (snapshot.coinBudget | 0) - wallsLeft,
+      singlesUsed: (snapshot.singleBudget | 0) - singlesLeft,
+      deadlineHit: wallsLeft > 0 || singlesLeft > 0
+    };
+  }
+
+  function collectTacticalPadTargets(grid, mode) {
+    const targets = [];
+    for (let y = 0; y < GRID_SIZE; y++) {
+      for (let x = 0; x < GRID_SIZE; x++) {
+        const type = padTypeFromCell(grid[y][x]);
+        if (mode === "reverse" && (type === "detour" || type === "rewind")) {
+          const target = { x, y, type };
+          if (type === "detour") {
+            let bestCorridor = null;
+            for (const move of MOVES) {
+              let corridor = 0;
+              let cx = x;
+              let cy = y;
+              while (true) {
+                cx += move.dx;
+                cy += move.dy;
+                if (!isInsideGrid(cx, cy) || !isWalkableCell(grid, cx, cy)) break;
+                corridor++;
+              }
+              if (!bestCorridor || corridor > bestCorridor.length) {
+                bestCorridor = { dx: move.dx, dy: move.dy, length: corridor };
+              }
+            }
+            if (bestCorridor?.length) {
+              target.approach = { x: x + bestCorridor.dx, y: y + bestCorridor.dy };
+              target.openCorridor = bestCorridor.length;
+            }
+          }
+          targets.push(target);
+        }
+        if (mode === "slow" && (type === "slow" || type === "stone")) targets.push({ x, y, type });
+      }
+    }
+    return targets;
+  }
+
+  function pathDistance(path) {
+    return computeSegmentLengths(path || []).reduce((sum, value) => sum + value, 0);
+  }
+
+  function openRayLength(grid, x, y, dx, dy) {
+    let length = 0;
+    let cx = x;
+    let cy = y;
+    while (dx !== 0 || dy !== 0) {
+      cx += dx;
+      cy += dy;
+      if (!isInsideGrid(cx, cy) || !isWalkableCell(grid, cx, cy)) break;
+      length++;
+    }
+    return length;
+  }
+
+  function analyzePadOpportunities(grid) {
+    const basePath = computePath(grid);
+    const basePathDistance = pathDistance(basePath);
+    const start = { x: ENTRANCE_X, y: GRID_SIZE - 1 };
+    const pads = [];
+    for (let y = 0; y < GRID_SIZE; y++) {
+      for (let x = 0; x < GRID_SIZE; x++) {
+        const type = padTypeFromCell(grid[y][x]);
+        if (!type) continue;
+        const pathIndex = basePath.findIndex((node) => node.x === x && node.y === y);
+        const prefixPath = findPath(grid, start, { x, y });
+        const suffixPath = computePathFromCell(grid, { x, y });
+        const prefixDistance = pathDistance(prefixPath);
+        const viaDistance =
+          prefixPath.length && suffixPath.length
+            ? prefixDistance + pathDistance(suffixPath)
+            : Infinity;
+        const blocked = cloneGrid(grid);
+        blocked[y][x] = CELL_PLAYER;
+        ensureOpenings(blocked);
+        const bypassPath = computePath(blocked);
+        const bypassDistance = bypassPath.length ? pathDistance(bypassPath) : Infinity;
+        let bestRay = null;
+        for (const move of MOVES) {
+          const approach = openRayLength(grid, x, y, -move.dx, -move.dy);
+          const continuation = openRayLength(grid, x, y, move.dx, move.dy);
+          const candidate = { dx: move.dx, dy: move.dy, approach, continuation };
+          if (
+            !bestRay ||
+            candidate.continuation > bestRay.continuation ||
+            (candidate.continuation === bestRay.continuation && candidate.approach > bestRay.approach)
+          ) {
+            bestRay = candidate;
+          }
+        }
+        pads.push({
+          x,
+          y,
+          type,
+          onBasePath: pathIndex >= 0,
+          pathIndex,
+          prefixDistance,
+          viaDistance,
+          bypassDistance,
+          mandatory: !Number.isFinite(bypassDistance),
+          cleanRouteMargin: Number.isFinite(bypassDistance) ? bypassDistance - basePathDistance : Infinity,
+          bestRay
+        });
+      }
+    }
+    const modeScores = new Map();
+    const byType = (type) => pads.filter((pad) => pad.type === type);
+    const rewindPads = byType("rewind");
+    if (rewindPads.length) {
+      modeScores.set(
+        "rewind",
+        18 + Math.max(...rewindPads.map((pad) => (Number.isFinite(pad.prefixDistance) ? pad.prefixDistance / NPC_SPEED : 0)))
+      );
+    }
+    const stonePads = byType("stone");
+    if (stonePads.length) {
+      modeScores.set("stone", 12 + Math.max(...stonePads.map((pad) => pad.bestRay?.continuation || 0)) * 0.8);
+    }
+    const detourPads = byType("detour");
+    if (detourPads.length) {
+      modeScores.set("detour", 9 + Math.max(...detourPads.map((pad) => pad.bestRay?.approach || 0)) * 0.5);
+    }
+    const slowPads = byType("slow");
+    if (slowPads.length) modeScores.set("slow", 5 + Math.min(5, slowPads.length) * 1.25);
+    const speedPads = byType("speed");
+    const speedOnPath = speedPads.filter((pad) => pad.onBasePath).length;
+    if (speedPads.length) modeScores.set("speed", 4 + speedOnPath * 3 + speedPads.filter((pad) => !pad.mandatory).length * 0.2);
+    const targetMap = {
+      rewind: rewindPads
+        .slice()
+        .sort((a, b) => b.prefixDistance - a.prefixDistance || a.y - b.y || a.x - b.x)
+        .slice(0, 2),
+      stone: stonePads
+        .slice()
+        .sort(
+          (a, b) =>
+            (b.bestRay?.continuation || 0) - (a.bestRay?.continuation || 0) ||
+            a.y - b.y ||
+            a.x - b.x
+        )
+        .slice(0, 2),
+      detour: detourPads
+        .slice()
+        .sort(
+          (a, b) =>
+            (b.bestRay?.approach || 0) - (a.bestRay?.approach || 0) ||
+            a.y - b.y ||
+            a.x - b.x
+        )
+        .slice(0, 2),
+      slow: slowPads
+        .slice()
+        .sort((a, b) => Number(b.onBasePath) - Number(a.onBasePath) || a.pathIndex - b.pathIndex || a.y - b.y || a.x - b.x)
+        .slice(0, 4),
+      speed: speedPads
+        .slice()
+        .sort(
+          (a, b) =>
+            Number(b.onBasePath) - Number(a.onBasePath) ||
+            Number(a.mandatory) - Number(b.mandatory) ||
+            a.cleanRouteMargin - b.cleanRouteMargin ||
+            a.y - b.y ||
+            a.x - b.x
+        )
+        .slice(0, 4)
+    };
+    const modes = Array.from(modeScores, ([mode, score]) => ({ mode, score, targets: targetMap[mode] || [] })).sort(
+      (a, b) => b.score - a.score || a.mode.localeCompare(b.mode)
+    );
+    return { basePath, basePathDistance, pads, modes };
+  }
+
+  function pathStep(path, index) {
+    if (!path?.[index] || !path[index + 1]) return null;
+    return {
+      x: Math.sign(path[index + 1].x - path[index].x),
+      y: Math.sign(path[index + 1].y - path[index].y)
+    };
+  }
+
+  function padTacticalPathPotential(grid, path, targets, mode) {
+    if (!path?.length) return -Infinity;
+    let potential = 0;
+    let speedPads = 0;
+    for (const node of path) {
+      if (padTypeFromCell(grid[node.y]?.[node.x]) === "speed") speedPads++;
+    }
+    for (const target of targets || []) {
+      const index = path.findIndex((node) => node.x === target.x && node.y === target.y);
+      let nearest = Infinity;
+      for (const node of path) nearest = Math.min(nearest, Math.hypot(node.x - target.x, node.y - target.y));
+      if (index < 0) {
+        if (mode !== "speed") potential += 1.5 / (1 + nearest);
+        continue;
+      }
+      if (mode === "rewind") {
+        potential += 5 + pathDistance(path.slice(0, index + 1)) / NPC_SPEED * 0.12;
+      } else if (mode === "stone") {
+        const incoming = index > 0 ? pathStep(path, index - 1) : null;
+        let straight = 0;
+        if (incoming) {
+          for (let cursor = index; cursor < path.length - 1; cursor++) {
+            const next = pathStep(path, cursor);
+            if (!next || next.x !== incoming.x || next.y !== incoming.y) break;
+            straight += Math.hypot(next.x, next.y);
+          }
+        }
+        potential += 3 + Math.min(4, straight * 0.18);
+      } else if (mode === "detour") {
+        const previous = index > 0 ? path[index - 1] : null;
+        potential += 3 + estimateDetourForcedDistance(grid, target, previous) / NPC_SPEED * 0.25;
+      } else if (mode === "slow") {
+        potential += 1.5;
+      }
+    }
+    if (mode === "speed") potential += Math.max(0, 4 - speedPads * 2);
+    else potential -= speedPads * 0.25;
+    return potential;
+  }
+
+  function padDiagnosticGuide(outcome, mode) {
+    const diagnostics = outcome?.diagnostics || {};
+    if (mode === "stone") {
+      return Math.min(4, (diagnostics.stoneActiveDistance || 0) * 0.12) +
+        Math.min(2, (diagnostics.stoneHazardOverlapTime || 0) * 0.2);
+    }
+    if (mode === "rewind") return Math.min(5, (diagnostics.rewindPrefixTime || 0) * 0.12);
+    if (mode === "detour") return Math.min(4, (diagnostics.detourReverseDistance || 0) / NPC_SPEED * 0.3);
+    if (mode === "slow") {
+      return Math.min(4, (diagnostics.slowStackTime || 0) * 0.35) +
+        Math.min(2, (diagnostics.slowHazardOverlapTime || 0) * 0.2);
+    }
+    if (mode === "speed") {
+      return -Math.min(5, (diagnostics.fastActiveTime || 0) * 0.35 + (diagnostics.fastStackTime || 0) * 0.8);
+    }
+    return 0;
+  }
+
+  function tacticalPathPotential(grid, path, targets, mode) {
+    if (!path?.length || !targets?.length) return 0;
+    let potential = 0;
+    const pathCells = new Set();
+    for (const node of path) {
+      if (isInsideGrid(node.x, node.y)) pathCells.add(keyFor(node.x, node.y));
+    }
+    for (const target of targets) {
+      let distance = Infinity;
+      for (const node of path) {
+        if (!isInsideGrid(node.x, node.y)) continue;
+        distance = Math.min(distance, Math.hypot(node.x - target.x, node.y - target.y));
+      }
+      const reached = pathCells.has(keyFor(target.x, target.y));
+      const weight = mode === "reverse" ? 13 : target.type === "stone" ? 6 : 4.5;
+      potential += reached ? weight : weight / (1 + distance);
+      if (mode === "reverse" && target.type === "detour" && target.approach) {
+        const startToApproach = findPath(
+          grid,
+          { x: ENTRANCE_X, y: GRID_SIZE - 1 },
+          { x: target.approach.x, y: target.approach.y }
+        );
+        const targetToFinish = computePathFromCell(grid, target);
+        if (startToApproach.length && targetToFinish.length) {
+          const directed = startToApproach.concat(targetToFinish);
+          const directedDistance = computeSegmentLengths(directed).reduce((sum, value) => sum + value, 0);
+          const shortestDistance = computeSegmentLengths(path).reduce((sum, value) => sum + value, 0);
+          const gap = Math.max(0, directedDistance - shortestDistance);
+          potential -= gap * 12;
+        }
+      }
+      if (mode === "reverse" && reached && target.type === "detour") {
+        const index = path.findIndex((node) => node.x === target.x && node.y === target.y);
+        const previous = index > 0 ? path[index - 1] : null;
+        if (previous) {
+          const reverseX = -Math.sign(target.x - previous.x);
+          const reverseY = -Math.sign(target.y - previous.y);
+          let corridor = 0;
+          let x = target.x;
+          let y = target.y;
+          while (reverseX !== 0 || reverseY !== 0) {
+            x += reverseX;
+            y += reverseY;
+            if (!isInsideGrid(x, y) || !isWalkableCell(grid, x, y)) break;
+            corridor++;
+          }
+          const preferredApproach =
+            target.approach && previous.x === target.approach.x && previous.y === target.approach.y;
+          potential += corridor * (preferredApproach ? 8 : 2);
+          if (preferredApproach) potential += 80;
+        }
+      }
+    }
+    let speedPads = 0;
+    for (const node of path) {
+      if (isInsideGrid(node.x, node.y) && padTypeFromCell(grid[node.y][node.x]) === "speed") speedPads++;
+    }
+    return potential - speedPads * 1.5;
+  }
+
+  function findBestExactHazardPlan(grid, specialType, neutralSpecials, baseGrid, limit, profile) {
+    const pathInfo = analyzePath(grid);
+    if (!pathInfo) return null;
+    const candidates = collectHazardCandidateCells(grid, pathInfo, specialType, neutralSpecials, limit);
+    let best = null;
+    for (const cell of candidates) {
+      const planned = evaluateHazardPlan(grid, specialType, neutralSpecials, cell, baseGrid, AI_WEIGHT_DEFAULTS);
+      profile.hazardEvaluations++;
+      if (!planned) continue;
+      const simulatedTime = simulateRunnerTime(planned.grid, planned.special, neutralSpecials, {
+        pathInfo: planned.pathInfo
+      });
+      profile.exactSimulations++;
+      if (!Number.isFinite(simulatedTime)) continue;
+      const candidate = { ...planned, simulatedTime, signature: keyFor(cell.x, cell.y) };
+      if (
+        !best ||
+        candidate.simulatedTime > best.simulatedTime + 1e-9 ||
+        (Math.abs(candidate.simulatedTime - best.simulatedTime) <= 1e-9 &&
+          candidate.signature.localeCompare(best.signature) < 0)
+      ) {
+        best = candidate;
+      }
+    }
+    return best;
+  }
+
+  function buildExactTacticalRollout(snapshot, options = {}) {
+    const startedAt = nowMs();
+    const mode = options.mode || "reverse";
+    const maxBuildMs = Math.max(300, options.maxBuildMs || 2600);
+    const deterministicBudget = options.deterministicBudget === true;
+    const candidateLimit = Math.max(8, options.candidateLimit || 18);
+    const specialPlacementDepth = Math.max(0, options.specialPlacementDepth ?? 3);
+    const neutralSpecials = cloneNeutralSpecials(snapshot.baseNeutralSpecials || []);
+    const targets = collectTacticalPadTargets(snapshot.baseGrid, mode);
+    if (!targets.length) return null;
+    const focusCells = targets.flatMap((target) => (target.approach ? [target, target.approach] : [target]));
+    let grid = cloneGrid(snapshot.baseGrid);
+    let special = createSpecialTemplate(snapshot.specialTemplate?.type || "radius");
+    let wallsLeft = Math.max(0, snapshot.coinBudget | 0);
+    let singlesLeft = Math.max(0, snapshot.singleBudget | 0);
+    const placementOrder = [];
+    const profile = { exactSimulations: 0, hazardEvaluations: 0 };
+    let placementsMade = 0;
+    let lastHazardPlan = null;
+    function planHazard(limit = 24) {
+      const plan = findBestExactHazardPlan(
+        grid,
+        special.type,
+        neutralSpecials,
+        snapshot.baseGrid,
+        limit,
+        profile
+      );
+      if (!plan) return false;
+      lastHazardPlan = plan;
+      grid = plan.grid;
+      special = plan.special;
+      return true;
+    }
+    while (
+      (wallsLeft > 0 || singlesLeft > 0) &&
+      (deterministicBudget || nowMs() - startedAt < maxBuildMs)
+    ) {
+      if (!special.placed && placementsMade >= specialPlacementDepth && !planHazard()) break;
+      const pathInfo = analyzePath(grid);
+      if (!pathInfo) break;
+      const candidates = collectPlacementCandidates(
+        grid,
+        pathInfo,
+        special,
+        wallsLeft,
+        singlesLeft,
+        candidateLimit,
+        focusCells
+      );
+      let best = null;
+      for (const candidate of candidates) {
+        if (!deterministicBudget && nowMs() - startedAt >= maxBuildMs) break;
+        const nextGrid = cloneGrid(grid);
+        applySearchPlacement(nextGrid, candidate);
+        const outcome = simulateRunnerOutcome(nextGrid, special.placed ? special : null, neutralSpecials, {
+          diagnostics: false
+        });
+        profile.exactSimulations++;
+        if (!outcome || !Number.isFinite(outcome.time)) continue;
+        const guide = tacticalPathPotential(nextGrid, outcome.path, targets, mode);
+        const score = outcome.time + guide;
+        const signature = `${candidate.type}:${candidate.x},${candidate.y}`;
+        if (!best || score > best.score + 1e-9 || (Math.abs(score - best.score) <= 1e-9 && signature < best.signature)) {
+          best = { candidate, grid: nextGrid, score, signature };
+        }
+      }
+      if (!best) break;
+      grid = best.grid;
+      placementOrder.push(makePlacementOrderEntry(best.candidate));
+      if (best.candidate.type === "wall") wallsLeft--;
+      else singlesLeft--;
+      placementsMade++;
+    }
+    const rawGrid = cloneGrid(grid);
+    if (special.cell) rawGrid[special.cell.y][special.cell.x] = CELL_EMPTY;
+    ensureOpenings(rawGrid);
+    grid = rawGrid;
+    special = createSpecialTemplate(snapshot.specialTemplate?.type || "radius");
+    if (!planHazard(30)) return null;
+    const simulatedTime = lastHazardPlan?.simulatedTime;
+    if (!Number.isFinite(simulatedTime)) return null;
+    placementOrder.push({
+      type: "special",
+      row: special.cell.y + 1,
+      column: special.cell.x + 1,
+      specialCell: { ...special.cell },
+      specialHotspots: []
+    });
+    return {
+      grid,
+      special,
+      placementOrder,
+      simulatedTime,
+      totalMs: nowMs() - startedAt,
+      wallsUsed: (snapshot.coinBudget | 0) - wallsLeft,
+      singlesUsed: (snapshot.singleBudget | 0) - singlesLeft,
+      deadlineHit: wallsLeft > 0 || singlesLeft > 0,
+      tacticalMode: mode,
+      tacticalTargets: targets,
+      profile
+    };
+  }
+
+  function buildTacticalBeamRollout(snapshot, options = {}) {
+    const startedAt = nowMs();
+    const mode = options.mode || "reverse";
+    const maxBuildMs = Math.max(500, options.maxBuildMs || 3000);
+    const deterministicBudget = options.deterministicBudget === true;
+    const candidateLimit = Math.max(8, options.candidateLimit || 18);
+    const beamWidth = Math.max(2, options.beamWidth || 4);
+    const neutralSpecials = cloneNeutralSpecials(snapshot.baseNeutralSpecials || []);
+    const targets = collectTacticalPadTargets(snapshot.baseGrid, mode);
+    if (!targets.length) return null;
+    const focusCells = targets.flatMap((target) => (target.approach ? [target, target.approach] : [target]));
+    let beam = [
+      {
+        grid: cloneGrid(snapshot.baseGrid),
+        wallsLeft: Math.max(0, snapshot.coinBudget | 0),
+        singlesLeft: Math.max(0, snapshot.singleBudget | 0),
+        placementOrder: [],
+        score: -Infinity,
+        signature: gridSearchSignature(snapshot.baseGrid)
+      }
+    ];
+    const totalDepth = beam[0].wallsLeft + beam[0].singlesLeft;
+    const profile = { exactSimulations: 0, hazardEvaluations: 0 };
+    for (
+      let depth = 0;
+      depth < totalDepth && beam.length && (deterministicBudget || nowMs() - startedAt < maxBuildMs);
+      depth++
+    ) {
+      const children = [];
+      for (const state of beam) {
+        const pathInfo = analyzePath(state.grid);
+        if (!pathInfo) continue;
+        const candidates = collectPlacementCandidates(
+          state.grid,
+          pathInfo,
+          null,
+          state.wallsLeft,
+          state.singlesLeft,
+          candidateLimit,
+          focusCells
+        );
+        for (const candidate of candidates) {
+          if (!deterministicBudget && nowMs() - startedAt >= maxBuildMs) break;
+          const grid = cloneGrid(state.grid);
+          applySearchPlacement(grid, candidate);
+          const outcome = simulateRunnerOutcome(grid, null, neutralSpecials, { diagnostics: false });
+          profile.exactSimulations++;
+          if (!outcome || !Number.isFinite(outcome.time)) continue;
+          const guide = tacticalPathPotential(grid, outcome.path, targets, mode);
+          const signature = gridSearchSignature(grid);
+          children.push({
+            grid,
+            wallsLeft: state.wallsLeft - Number(candidate.type === "wall"),
+            singlesLeft: state.singlesLeft - Number(candidate.type === "single"),
+            placementOrder: state.placementOrder.concat(makePlacementOrderEntry(candidate)),
+            score: outcome.time + guide,
+            signature
+          });
+        }
+      }
+      children.sort(compareSearchEntries);
+      const unique = [];
+      const seen = new Set();
+      for (const child of children) {
+        if (seen.has(child.signature)) continue;
+        seen.add(child.signature);
+        unique.push(child);
+        if (unique.length >= beamWidth) break;
+      }
+      if (!unique.length) break;
+      beam = unique;
+    }
+    const finalists = [];
+    for (const state of beam) {
+      const plan = findBestExactHazardPlan(
+        state.grid,
+        snapshot.specialTemplate?.type || "radius",
+        neutralSpecials,
+        snapshot.baseGrid,
+        30,
+        profile
+      );
+      if (!plan) continue;
+      const placementOrder = state.placementOrder.concat({
+        type: "special",
+        row: plan.special.cell.y + 1,
+        column: plan.special.cell.x + 1,
+        specialCell: { ...plan.special.cell },
+        specialHotspots: []
+      });
+      finalists.push({
+        grid: plan.grid,
+        special: plan.special,
+        placementOrder,
+        simulatedTime: plan.simulatedTime,
+        wallsUsed: (snapshot.coinBudget | 0) - state.wallsLeft,
+        singlesUsed: (snapshot.singleBudget | 0) - state.singlesLeft,
+        signature: state.signature
+      });
+    }
+    finalists.sort((a, b) => b.simulatedTime - a.simulatedTime || a.signature.localeCompare(b.signature));
+    const best = finalists[0];
+    if (!best) return null;
+    return {
+      ...best,
+      totalMs: nowMs() - startedAt,
+      deadlineHit: best.wallsUsed < (snapshot.coinBudget | 0) || best.singlesUsed < (snapshot.singleBudget | 0),
+      tacticalMode: mode,
+      tacticalTargets: targets,
+      profile
+    };
+  }
+
+  function buildPadTacticalBeam(snapshot, options = {}) {
+    const startedAt = nowMs();
+    const mode = options.mode || "speed";
+    const maxBuildMs = Math.max(500, options.maxBuildMs || 1500);
+    const deterministicBudget = options.deterministicBudget === true;
+    const candidateLimit = Math.max(6, options.candidateLimit || 10);
+    const beamWidth = Math.max(2, options.beamWidth || 3);
+    const neutralSpecials = cloneNeutralSpecials(snapshot.baseNeutralSpecials || []);
+    const analysis = options.analysis || analyzePadOpportunities(snapshot.baseGrid);
+    const opportunity = analysis.modes.find((entry) => entry.mode === mode);
+    if (!opportunity?.targets?.length) return null;
+    const targets = opportunity.targets;
+    const focusCells = [];
+    const focusKeys = new Set();
+    function addFocus(x, y) {
+      if (!isInsideGrid(x, y)) return;
+      const signature = keyFor(x, y);
+      if (focusKeys.has(signature)) return;
+      focusKeys.add(signature);
+      focusCells.push({ x, y });
+    }
+    for (const target of targets) {
+      addFocus(target.x, target.y);
+      if ((mode === "stone" || mode === "detour") && target.bestRay) {
+        const direction = mode === "stone"
+          ? { dx: target.bestRay.dx, dy: target.bestRay.dy }
+          : { dx: -target.bestRay.dx, dy: -target.bestRay.dy };
+        for (let step = 1; step <= 5; step++) {
+          addFocus(target.x + direction.dx * step, target.y + direction.dy * step);
+        }
+      }
+    }
+    let beam = [
+      {
+        grid: cloneGrid(snapshot.baseGrid),
+        wallsLeft: Math.max(0, snapshot.coinBudget | 0),
+        singlesLeft: Math.max(0, snapshot.singleBudget | 0),
+        placementOrder: [],
+        score: -Infinity,
+        signature: gridSearchSignature(snapshot.baseGrid),
+        diagnostics: null
+      }
+    ];
+    const totalDepth = beam[0].wallsLeft + beam[0].singlesLeft;
+    const profile = {
+      exactSimulations: 0,
+      hazardEvaluations: 0,
+      mode,
+      opportunityScore: opportunity.score,
+      targetCount: targets.length
+    };
+    for (
+      let depth = 0;
+      depth < totalDepth && beam.length && (deterministicBudget || nowMs() - startedAt < maxBuildMs);
+      depth++
+    ) {
+      const children = [];
+      for (const state of beam) {
+        const pathInfo = analyzePath(state.grid);
+        if (!pathInfo) continue;
+        const candidates = collectPlacementCandidates(
+          state.grid,
+          pathInfo,
+          null,
+          state.wallsLeft,
+          state.singlesLeft,
+          candidateLimit,
+          focusCells
+        );
+        for (const candidate of candidates) {
+          if (!deterministicBudget && nowMs() - startedAt >= maxBuildMs) break;
+          const grid = cloneGrid(state.grid);
+          applySearchPlacement(grid, candidate);
+          const outcome = simulateRunnerOutcome(grid, null, neutralSpecials);
+          profile.exactSimulations++;
+          if (!outcome || !Number.isFinite(outcome.time)) continue;
+          const pathGuide = padTacticalPathPotential(grid, outcome.path, targets, mode);
+          const diagnosticGuide = padDiagnosticGuide(outcome, mode);
+          const signature = gridSearchSignature(grid);
+          children.push({
+            grid,
+            wallsLeft: state.wallsLeft - Number(candidate.type === "wall"),
+            singlesLeft: state.singlesLeft - Number(candidate.type === "single"),
+            placementOrder: state.placementOrder.concat(makePlacementOrderEntry(candidate)),
+            score: outcome.time + pathGuide + diagnosticGuide,
+            exactTime: outcome.time,
+            diagnostics: outcome.diagnostics,
+            signature
+          });
+        }
+        if (state.wallsLeft >= 2 && depth % 3 === 0) {
+          const firstWalls = candidates.filter((candidate) => candidate.type === "wall").slice(0, 3);
+          for (const first of firstWalls) {
+            const firstGrid = cloneGrid(state.grid);
+            applySearchPlacement(firstGrid, first);
+            const firstPath = analyzePath(firstGrid);
+            if (!firstPath) continue;
+            const secondWalls = collectPlacementCandidates(
+              firstGrid,
+              firstPath,
+              null,
+              state.wallsLeft - 1,
+              0,
+              6,
+              focusCells
+            )
+              .filter((candidate) => candidate.type === "wall")
+              .slice(0, 2);
+            for (const second of secondWalls) {
+              const grid = cloneGrid(firstGrid);
+              applySearchPlacement(grid, second);
+              const outcome = simulateRunnerOutcome(grid, null, neutralSpecials);
+              profile.exactSimulations++;
+              if (!outcome || !Number.isFinite(outcome.time)) continue;
+              const pathGuide = padTacticalPathPotential(grid, outcome.path, targets, mode);
+              const diagnosticGuide = padDiagnosticGuide(outcome, mode);
+              const signature = gridSearchSignature(grid);
+              children.push({
+                grid,
+                wallsLeft: state.wallsLeft - 2,
+                singlesLeft: state.singlesLeft,
+                placementOrder: state.placementOrder.concat(
+                  makePlacementOrderEntry(first),
+                  makePlacementOrderEntry(second)
+                ),
+                score: outcome.time + pathGuide + diagnosticGuide,
+                exactTime: outcome.time,
+                diagnostics: outcome.diagnostics,
+                signature
+              });
+            }
+          }
+        }
+      }
+      children.sort(compareSearchEntries);
+      const unique = [];
+      const seen = new Set();
+      for (const child of children) {
+        if (seen.has(child.signature)) continue;
+        seen.add(child.signature);
+        unique.push(child);
+        if (unique.length >= beamWidth) break;
+      }
+      if (!unique.length) break;
+      beam = unique;
+    }
+    const finalists = [];
+    for (const state of beam) {
+      const plan = findBestExactHazardPlan(
+        state.grid,
+        snapshot.specialTemplate?.type || "radius",
+        neutralSpecials,
+        snapshot.baseGrid,
+        24,
+        profile
+      );
+      if (!plan) continue;
+      const outcome = simulateRunnerOutcome(plan.grid, plan.special, neutralSpecials);
+      profile.exactSimulations++;
+      if (!outcome || !Number.isFinite(outcome.time)) continue;
+      finalists.push({
+        grid: plan.grid,
+        special: plan.special,
+        placementOrder: state.placementOrder.concat({
+          type: "special",
+          row: plan.special.cell.y + 1,
+          column: plan.special.cell.x + 1,
+          specialCell: { ...plan.special.cell },
+          specialHotspots: []
+        }),
+        simulatedTime: outcome.time,
+        wallsUsed: (snapshot.coinBudget | 0) - state.wallsLeft,
+        singlesUsed: (snapshot.singleBudget | 0) - state.singlesLeft,
+        signature: state.signature,
+        padDiagnostics: outcome.diagnostics,
+        padGuide: padDiagnosticGuide(outcome, mode),
+        targetReached: outcome.diagnostics.padEvents.some((event) => event.type === mode)
+      });
+    }
+    finalists.sort((a, b) => b.simulatedTime - a.simulatedTime || b.padGuide - a.padGuide || a.signature.localeCompare(b.signature));
+    const best = finalists[0];
+    if (!best) return null;
+    profile.targetLayouts = finalists.filter((entry) => entry.targetReached).length;
+    return {
+      ...best,
+      totalMs: nowMs() - startedAt,
+      deadlineHit: best.wallsUsed < (snapshot.coinBudget | 0) || best.singlesUsed < (snapshot.singleBudget | 0),
+      tacticalMode: mode,
+      tacticalTargets: targets,
+      opportunity,
+      profile
+    };
+  }
+
+  function collectTwoByTwoOrigins(grid, value) {
+    const origins = [];
+    for (let y = 0; y < GRID_SIZE - 1; y++) {
+      for (let x = 0; x < GRID_SIZE - 1; x++) {
+        if (
+          grid[y][x] === value &&
+          grid[y][x + 1] === value &&
+          grid[y + 1][x] === value &&
+          grid[y + 1][x + 1] === value
+        ) {
+          origins.push({ x, y });
+        }
+      }
+    }
+    return origins;
+  }
+
+  function wallOriginsFromPlacementOrder(placementOrder) {
+    return (placementOrder || [])
+      .filter((entry) => entry.type === "wall")
+      .map((entry) => ({ x: entry.column - 1, y: entry.row - 1 }));
+  }
+
+  function isDiagonalWallLink(a, b) {
+    const dx = Math.abs(a.x - b.x);
+    const dy = Math.abs(a.y - b.y);
+    return (dx === 3 && dy >= 2 && dy <= 4) || (dy === 3 && dx >= 2 && dx <= 4);
+  }
+
+  function diagonalMotifValue(placementOrder, staticOrigins) {
+    const playerOrigins = wallOriginsFromPlacementOrder(placementOrder);
+    let links = 0;
+    for (let index = 0; index < playerOrigins.length; index++) {
+      for (let other = index + 1; other < playerOrigins.length; other++) {
+        if (isDiagonalWallLink(playerOrigins[index], playerOrigins[other])) links += 1;
+      }
+      if ((staticOrigins || []).some((origin) => isDiagonalWallLink(playerOrigins[index], origin))) links += 0.35;
+    }
+    return links;
+  }
+
+  function collectMotifPlacementCandidates(
+    grid,
+    pathInfo,
+    wallsLeft,
+    singlesLeft,
+    placementOrder,
+    staticOrigins,
+    focusCells,
+    limit
+  ) {
+    const motifSlots = wallsLeft > 0 ? Math.max(3, Math.floor(limit * 0.35)) : 0;
+    const baseline = collectPlacementCandidates(
+      grid,
+      pathInfo,
+      null,
+      wallsLeft,
+      singlesLeft,
+      Math.max(8, limit - motifSlots),
+      focusCells
+    );
+    const baselineKeys = new Set(baseline.map((candidate) => candidate.key));
+    const motifCandidates = new Map();
+    if (wallsLeft > 0) {
+      const anchors = wallOriginsFromPlacementOrder(placementOrder).concat(staticOrigins || []);
+      for (const anchor of anchors) {
+        for (const dx of [-3, -2, 2, 3]) {
+          for (const dy of [-3, -2, 2, 3]) {
+            if (Math.abs(dx) !== 3 && Math.abs(dy) !== 3) continue;
+            const x = anchor.x + dx;
+            const y = anchor.y + dy;
+            if (!canPlaceBlock(grid, x, y)) continue;
+            const candidate = { type: "wall", x, y, key: `w:${keyFor(x, y)}` };
+            const linkCount = anchors.reduce((sum, origin) => sum + Number(isDiagonalWallLink(candidate, origin)), 0);
+            candidate.preliminary =
+              placementPreliminaryScore(grid, candidate, pathInfo?.path, null) +
+              candidateFocusBonus(candidate, focusCells) +
+              linkCount * 95;
+            if (baselineKeys.has(candidate.key)) continue;
+            const existing = motifCandidates.get(candidate.key);
+            if (!existing || candidate.preliminary > existing.preliminary) motifCandidates.set(candidate.key, candidate);
+          }
+        }
+      }
+    }
+    const extensions = Array.from(motifCandidates.values())
+      .sort((a, b) => b.preliminary - a.preliminary || a.key.localeCompare(b.key))
+      .slice(0, motifSlots);
+    return baseline.concat(extensions).slice(0, limit);
+  }
+
+  function buildMotifBeamRollout(snapshot, options = {}) {
+    const startedAt = nowMs();
+    const mode = options.mode || "route";
+    const maxBuildMs = Math.max(600, options.maxBuildMs || 2600);
+    const deterministicBudget = options.deterministicBudget === true;
+    const candidateLimit = Math.max(8, options.candidateLimit || 16);
+    const beamWidth = Math.max(2, options.beamWidth || 4);
+    const motifWeight = Math.max(0, options.motifWeight ?? 0.45);
+    const tacticalWeight = Math.max(
+      0,
+      options.tacticalWeight ?? (mode === "reverse" ? 0.18 : mode === "slow" ? 0.35 : 0)
+    );
+    const neutralSpecials = cloneNeutralSpecials(snapshot.baseNeutralSpecials || []);
+    const targets = mode === "route" ? [] : collectTacticalPadTargets(snapshot.baseGrid, mode);
+    if (mode !== "route" && !targets.length) return null;
+    const focusCells = targets.flatMap((target) => (target.approach ? [target, target.approach] : [target]));
+    const staticOrigins = collectTwoByTwoOrigins(snapshot.baseGrid, CELL_STATIC);
+    let beam = [
+      {
+        grid: cloneGrid(snapshot.baseGrid),
+        wallsLeft: Math.max(0, snapshot.coinBudget | 0),
+        singlesLeft: Math.max(0, snapshot.singleBudget | 0),
+        placementOrder: [],
+        score: -Infinity,
+        signature: gridSearchSignature(snapshot.baseGrid)
+      }
+    ];
+    const totalDepth = beam[0].wallsLeft + beam[0].singlesLeft;
+    const profile = { exactSimulations: 0, hazardEvaluations: 0 };
+    for (
+      let depth = 0;
+      depth < totalDepth && beam.length && (deterministicBudget || nowMs() - startedAt < maxBuildMs);
+      depth++
+    ) {
+      const children = [];
+      for (const state of beam) {
+        const pathInfo = analyzePath(state.grid);
+        if (!pathInfo) continue;
+        const candidates = collectMotifPlacementCandidates(
+          state.grid,
+          pathInfo,
+          state.wallsLeft,
+          state.singlesLeft,
+          state.placementOrder,
+          staticOrigins,
+          focusCells,
+          candidateLimit
+        );
+        for (const candidate of candidates) {
+          if (!deterministicBudget && nowMs() - startedAt >= maxBuildMs) break;
+          const grid = cloneGrid(state.grid);
+          applySearchPlacement(grid, candidate);
+          const outcome = simulateRunnerOutcome(grid, null, neutralSpecials, { diagnostics: false });
+          profile.exactSimulations++;
+          if (!outcome || !Number.isFinite(outcome.time)) continue;
+          const placementOrder = state.placementOrder.concat(makePlacementOrderEntry(candidate));
+          const motifGuide = diagonalMotifValue(placementOrder, staticOrigins) * motifWeight;
+          const tacticalGuide = targets.length
+            ? tacticalPathPotential(grid, outcome.path, targets, mode) * tacticalWeight
+            : 0;
+          const signature = gridSearchSignature(grid);
+          children.push({
+            grid,
+            wallsLeft: state.wallsLeft - Number(candidate.type === "wall"),
+            singlesLeft: state.singlesLeft - Number(candidate.type === "single"),
+            placementOrder,
+            score: outcome.time + motifGuide + tacticalGuide,
+            signature
+          });
+        }
+      }
+      children.sort(compareSearchEntries);
+      const unique = [];
+      const seen = new Set();
+      for (const child of children) {
+        if (seen.has(child.signature)) continue;
+        seen.add(child.signature);
+        unique.push(child);
+        if (unique.length >= beamWidth) break;
+      }
+      beam = unique;
+    }
+    const finalists = [];
+    for (const state of beam) {
+      const plan = findBestExactHazardPlan(
+        state.grid,
+        snapshot.specialTemplate?.type || "radius",
+        neutralSpecials,
+        snapshot.baseGrid,
+        30,
+        profile
+      );
+      if (!plan) continue;
+      finalists.push({
+        grid: plan.grid,
+        special: plan.special,
+        placementOrder: state.placementOrder.concat({
+          type: "special",
+          row: plan.special.cell.y + 1,
+          column: plan.special.cell.x + 1,
+          specialCell: { ...plan.special.cell },
+          specialHotspots: []
+        }),
+        simulatedTime: plan.simulatedTime,
+        wallsUsed: (snapshot.coinBudget | 0) - state.wallsLeft,
+        singlesUsed: (snapshot.singleBudget | 0) - state.singlesLeft,
+        signature: state.signature,
+        motifValue: diagonalMotifValue(state.placementOrder, staticOrigins)
+      });
+    }
+    finalists.sort((a, b) => b.simulatedTime - a.simulatedTime || a.signature.localeCompare(b.signature));
+    const best = finalists[0];
+    if (!best) return null;
+    return {
+      ...best,
+      totalMs: nowMs() - startedAt,
+      deadlineHit: best.wallsUsed < (snapshot.coinBudget | 0) || best.singlesUsed < (snapshot.singleBudget | 0),
+      tacticalMode: mode,
+      tacticalTargets: targets,
+      profile
+    };
+  }
+
+  function buildTacticalPortfolioRollout(snapshot, options = {}) {
+    const startedAt = nowMs();
+    const mode = options.mode || "reverse";
+    const maxBuildMs = Math.max(600, options.maxBuildMs || 2600);
+    const deterministicBudget = options.deterministicBudget === true;
+    const candidateLimit = Math.max(6, options.candidateLimit || 11);
+    const rolloutLimit = Math.max(4, options.rolloutLimit || 24);
+    const tacticalWeight = Math.max(0, options.tacticalWeight ?? (mode === "reverse" ? 0.15 : 0.3));
+    const motifWeight = Math.max(0, options.motifWeight ?? 0.12);
+    const randomChoicePool = Math.max(2, options.randomChoicePool || 6);
+    const neutralSpecials = cloneNeutralSpecials(snapshot.baseNeutralSpecials || []);
+    const targets = collectTacticalPadTargets(snapshot.baseGrid, mode);
+    if (!targets.length) return null;
+    const focusCells = targets.flatMap((target) => (target.approach ? [target, target.approach] : [target]));
+    const staticOrigins = collectTwoByTwoOrigins(snapshot.baseGrid, CELL_STATIC);
+    const portfolioSalt = options.portfolioIndex
+      ? `tactical-portfolio:${mode}:${options.portfolioIndex}`
+      : `tactical-portfolio:${mode}`;
+    const rng = mulberry32(((snapshot.rngSeed || 0) ^ hashSeed(portfolioSalt)) >>> 0);
+    const profile = { exactSimulations: 0, hazardEvaluations: 0, rollouts: 0 };
+    const completed = [];
+    for (
+      let rolloutIndex = 0;
+      rolloutIndex < rolloutLimit && (deterministicBudget || nowMs() - startedAt < maxBuildMs);
+      rolloutIndex++
+    ) {
+      const rolloutTacticalWeight =
+        mode === "reverse" && rolloutIndex % 4 === 0 ? Math.max(tacticalWeight, 0.6) : tacticalWeight;
+      let grid = cloneGrid(snapshot.baseGrid);
+      let wallsLeft = Math.max(0, snapshot.coinBudget | 0);
+      let singlesLeft = Math.max(0, snapshot.singleBudget | 0);
+      const placementOrder = [];
+      while (
+        (wallsLeft > 0 || singlesLeft > 0) &&
+        (deterministicBudget || nowMs() - startedAt < maxBuildMs)
+      ) {
+        const pathInfo = analyzePath(grid);
+        if (!pathInfo) break;
+        const candidates = collectMotifPlacementCandidates(
+          grid,
+          pathInfo,
+          wallsLeft,
+          singlesLeft,
+          placementOrder,
+          staticOrigins,
+          focusCells,
+          candidateLimit
+        );
+        const ranked = [];
+        for (const candidate of candidates) {
+          if (!deterministicBudget && nowMs() - startedAt >= maxBuildMs) break;
+          const nextGrid = cloneGrid(grid);
+          applySearchPlacement(nextGrid, candidate);
+          const outcome = simulateRunnerOutcome(nextGrid, null, neutralSpecials, { diagnostics: false });
+          profile.exactSimulations++;
+          if (!outcome || !Number.isFinite(outcome.time)) continue;
+          const nextOrder = placementOrder.concat(makePlacementOrderEntry(candidate));
+          const guide =
+            tacticalPathPotential(nextGrid, outcome.path, targets, mode) * rolloutTacticalWeight +
+            diagonalMotifValue(nextOrder, staticOrigins) * motifWeight;
+          ranked.push({ candidate, grid: nextGrid, score: outcome.time + guide, exactTime: outcome.time });
+        }
+        ranked.sort((a, b) => b.score - a.score || a.candidate.key.localeCompare(b.candidate.key));
+        if (!ranked.length) break;
+        const choicePool = Math.min(ranked.length, rolloutIndex === 0 ? 1 : randomChoicePool);
+        const choiceIndex = rolloutIndex === 0 ? 0 : Math.min(choicePool - 1, Math.floor(rng() * rng() * choicePool));
+        const chosen = ranked[choiceIndex];
+        grid = chosen.grid;
+        placementOrder.push(makePlacementOrderEntry(chosen.candidate));
+        if (chosen.candidate.type === "wall") wallsLeft--;
+        else singlesLeft--;
+      }
+      const outcome = simulateRunnerOutcome(grid, null, neutralSpecials, { diagnostics: false });
+      profile.exactSimulations++;
+      if (outcome && Number.isFinite(outcome.time)) {
+        const targetReached = targets.some((target) =>
+          outcome.path.some((node) => node.x === target.x && node.y === target.y)
+        );
+        completed.push({
+          grid,
+          wallsLeft,
+          singlesLeft,
+          placementOrder,
+          exactTime: outcome.time,
+          targetReached,
+          tacticalPotential: tacticalPathPotential(grid, outcome.path, targets, mode),
+          signature: gridSearchSignature(grid)
+        });
+      }
+      profile.rollouts++;
+    }
+    profile.targetLayouts = completed.filter((state) => state.targetReached).length;
+    completed.sort((a, b) => b.exactTime - a.exactTime || a.signature.localeCompare(b.signature));
+    const finalistStates = completed
+      .slice(0, 3)
+      .concat(
+        completed
+          .filter((state) => state.targetReached)
+          .sort((a, b) => b.exactTime - a.exactTime || b.tacticalPotential - a.tacticalPotential)
+          .slice(0, 5)
+      );
+    const finalists = [];
+    const seen = new Set();
+    for (const state of finalistStates) {
+      if (seen.has(state.signature)) continue;
+      seen.add(state.signature);
+      const plan = findBestExactHazardPlan(
+        state.grid,
+        snapshot.specialTemplate?.type || "radius",
+        neutralSpecials,
+        snapshot.baseGrid,
+        30,
+        profile
+      );
+      if (plan) {
+        finalists.push({
+          grid: plan.grid,
+          special: plan.special,
+          placementOrder: state.placementOrder.concat({
+            type: "special",
+            row: plan.special.cell.y + 1,
+            column: plan.special.cell.x + 1,
+            specialCell: { ...plan.special.cell },
+            specialHotspots: []
+          }),
+          simulatedTime: plan.simulatedTime,
+          wallsUsed: (snapshot.coinBudget | 0) - state.wallsLeft,
+          singlesUsed: (snapshot.singleBudget | 0) - state.singlesLeft,
+          signature: state.signature,
+          targetReached: state.targetReached
+        });
+      }
+      if (finalists.length >= 5 || (!deterministicBudget && nowMs() - startedAt >= maxBuildMs + 900)) break;
+    }
+    finalists.sort((a, b) => b.simulatedTime - a.simulatedTime || a.signature.localeCompare(b.signature));
+    const best = finalists[0];
+    if (!best) return null;
+    return {
+      ...best,
+      totalMs: nowMs() - startedAt,
+      deadlineHit: best.wallsUsed < (snapshot.coinBudget | 0) || best.singlesUsed < (snapshot.singleBudget | 0),
+      tacticalMode: mode,
+      tacticalTargets: targets,
+      targetReached: best.targetReached,
+      profile
+    };
+  }
+
   function buildAiLayoutFromSnapshot(snapshot) {
+    const buildStartedAt = nowMs();
+    const limits = resolveAiSearchProfile(snapshot);
+    const deterministicBudget = snapshot.deterministicBudget !== false;
+    const previousGenerationMetrics = activeGenerationMetrics;
+    const workMetrics = {
+      pathSearches: 0,
+      pathNodesExpanded: 0,
+      simulations: 0,
+      simulationSteps: 0,
+      diagnosticSimulations: 0,
+      gridClones: 0
+    };
+    activeGenerationMetrics = workMetrics;
+    function finishBuild(result) {
+      if (result?.profile) result.profile.work = { ...workMetrics };
+      activeGenerationMetrics = previousGenerationMetrics;
+      return result;
+    }
+    // The optimized pad-aware portfolio is the universal opponent. Research
+    // benchmarks can still disable it explicitly to compare the core search.
+    const padAwareTactics = snapshot.padAwareTactics !== false;
+    const deadline = deterministicBudget ? Infinity : buildStartedAt + limits.maxBuildMs;
+    const aiWeights = { ...AI_WEIGHT_DEFAULTS, ...(snapshot.aiWeights || {}) };
+    const specialType = snapshot.specialTemplate?.type || "radius";
+    const baseGrid = cloneGrid(snapshot.baseGrid);
+    const neutralSpecials = cloneNeutralSpecials(snapshot.baseNeutralSpecials || []);
+    const profile = {
+      totalMs: 0,
+      placementMs: 0,
+      specialMs: 0,
+      reclaimMs: 0,
+      simulationMs: 0,
+      lookaheadUsed: 0,
+      placements: 0,
+      source: "ai-core",
+      strategy: "bounded-route-search",
+      aiVersion: AI_VERSION,
+      difficulty: limits.name,
+      candidateBudget: limits.candidateBudget,
+      candidatesEvaluated: 0,
+      hazardEvaluations: 0,
+      cacheHits: 0,
+      exactSimulations: 0,
+      exactSearchSimulations: 0,
+      finalists: 0,
+      refinementMs: 0,
+      refinementEvaluations: 0,
+      refinements: 0,
+      deadlineHit: false,
+      budgetHit: false
+    };
+    profile.padAwareTactics = padAwareTactics;
+    const context = {
+      limits,
+      deadline,
+      profile,
+      aiWeights,
+      specialType,
+      baseGrid: snapshot.baseGrid,
+      neutralSpecials,
+      cache: new Map()
+    };
+    const initialEvaluation = evaluateSearchGrid(baseGrid, context, null, true);
+    if (!initialEvaluation) {
+      return finishBuild(buildLegacyAiLayoutFromSnapshot(snapshot));
+    }
+    const initialState = {
+      grid: baseGrid,
+      wallsLeft: Math.max(0, snapshot.coinBudget | 0),
+      singlesLeft: Math.max(0, snapshot.singleBudget | 0),
+      wallsUsed: 0,
+      singlesUsed: 0,
+      placementOrder: [],
+      depth: 0,
+      evaluation: initialEvaluation,
+      score: initialEvaluation.score,
+      signature: gridSearchSignature(baseGrid)
+    };
+    let beam = [initialState];
+    const archive = new Map();
+    addSearchArchive(archive, initialState);
+    const totalDepth = initialState.wallsLeft + initialState.singlesLeft;
+    const placementStartedAt = nowMs();
+    for (let depth = 0; depth < totalDepth && beam.length; depth++) {
+      if (profile.candidatesEvaluated >= limits.candidateBudget) {
+        profile.budgetHit = true;
+        break;
+      }
+      if (nowMs() >= deadline) {
+        profile.deadlineHit = true;
+        break;
+      }
+      const children = [];
+      for (const state of beam) {
+        const candidates = collectPlacementCandidates(
+          state.grid,
+          state.evaluation.pathInfo,
+          state.evaluation.special,
+          state.wallsLeft,
+          state.singlesLeft,
+          limits.candidatesPerState
+        );
+        for (const candidate of candidates) {
+          if (profile.candidatesEvaluated >= limits.candidateBudget || nowMs() >= deadline) break;
+          if (candidate.type === "wall" && state.wallsLeft <= 0) continue;
+          if (candidate.type === "single" && state.singlesLeft <= 0) continue;
+          const nextGrid = cloneGrid(state.grid);
+          applySearchPlacement(nextGrid, candidate);
+          profile.candidatesEvaluated++;
+          const replanHazard = (depth + 1) % 3 === 0;
+          const evaluation = evaluateSearchGrid(nextGrid, context, state.evaluation.special, replanHazard);
+          if (!evaluation) continue;
+          const signature = gridSearchSignature(nextGrid);
+          children.push({
+            grid: nextGrid,
+            wallsLeft: state.wallsLeft - Number(candidate.type === "wall"),
+            singlesLeft: state.singlesLeft - Number(candidate.type === "single"),
+            wallsUsed: state.wallsUsed + Number(candidate.type === "wall"),
+            singlesUsed: state.singlesUsed + Number(candidate.type === "single"),
+            placementOrder: state.placementOrder.concat(makePlacementOrderEntry(candidate)),
+            depth: state.depth + 1,
+            evaluation,
+            score: evaluation.score,
+            signature
+          });
+        }
+      }
+      if (!children.length) break;
+      children.sort(compareSearchEntries);
+      let unique = [];
+      const seen = new Set();
+      for (const child of children) {
+        if (seen.has(child.signature)) continue;
+        seen.add(child.signature);
+        unique.push(child);
+        addSearchArchive(archive, child);
+        if (unique.length >= limits.beamWidth * 2) break;
+      }
+      if ((depth + 1) % 4 === 0) {
+        const exactStartedAt = nowMs();
+        for (const candidate of unique) {
+          const exactTime = simulateRunnerTime(
+            candidate.evaluation.grid,
+            candidate.evaluation.special,
+            neutralSpecials,
+            { pathInfo: candidate.evaluation.pathInfo }
+          );
+          profile.exactSearchSimulations++;
+          if (Number.isFinite(exactTime)) {
+            candidate.exactSearchTime = exactTime;
+            candidate.score = exactTime * 100 + candidate.score * 0.002;
+          }
+        }
+        profile.simulationMs += nowMs() - exactStartedAt;
+        unique.sort(compareSearchEntries);
+      }
+      beam = unique.slice(0, limits.beamWidth);
+    }
+    profile.placementMs = nowMs() - placementStartedAt;
+    profile.lookaheadUsed = profile.candidatesEvaluated;
+
+    const archivedStates = Array.from(archive.values());
+    const heuristicFinalists = archivedStates.slice().sort(compareSearchEntries).slice(0, Math.ceil(limits.finalistLimit / 2));
+    const deepestFinalists = archivedStates
+      .slice()
+      .sort((a, b) => b.depth - a.depth || compareSearchEntries(a, b))
+      .slice(0, Math.ceil(limits.finalistLimit / 2));
+    const finalistStates = [];
+    const finalistKeys = new Set();
+    for (const state of heuristicFinalists.concat(deepestFinalists)) {
+      if (finalistKeys.has(state.signature)) continue;
+      finalistKeys.add(state.signature);
+      finalistStates.push(state);
+      if (finalistStates.length >= limits.finalistLimit) break;
+    }
+    const finalists = [];
+    for (const state of finalistStates) {
+      const finalist = materializeSearchFinalist(state, context);
+      if (finalist) finalists.push(finalist);
+    }
+    const totalResources = Math.max(0, snapshot.coinBudget | 0) + Math.max(0, snapshot.singleBudget | 0);
+    const rolloutPlans = limits.name === "hard"
+      ? [
+          { specialPlacementDepth: 0, relocateAtEnd: true },
+          { specialPlacementDepth: 3, relocateAtEnd: true },
+          { specialPlacementDepth: totalResources, relocateAtEnd: true }
+        ]
+      : [{ specialPlacementDepth: 0, relocateAtEnd: true }];
+    const rolloutBudget = limits.name === "hard" ? 900 : 1800;
+    profile.rolloutMs = 0;
+    profile.rolloutUsed = false;
+    profile.rolloutCount = 0;
+    profile.rolloutDeadlineHit = false;
+    for (const rolloutPlan of rolloutPlans) {
+      const rolloutStartedAt = nowMs();
+      const rollout = buildRouteRolloutFromSnapshot(snapshot, {
+        maxBuildMs: rolloutBudget,
+        deterministicBudget,
+        ...rolloutPlan
+      });
+      profile.rolloutMs += nowMs() - rolloutStartedAt;
+      if (rollout && Number.isFinite(rollout.simulatedTime)) {
+        const rolloutPath = analyzePath(rollout.grid);
+        finalists.push({
+          ...rollout,
+          candidateSource: `route-rollout-${rolloutPlan.specialPlacementDepth}`,
+          heuristicScore: 0,
+          structureContacts: routeBarrierContact(rollout.grid, rolloutPath?.path),
+          existingStructureContacts: existingStructureContact(context.baseGrid, rolloutPath?.path)
+        });
+        profile.rolloutUsed = true;
+        profile.rolloutCount++;
+        profile.rolloutDeadlineHit ||= rollout.deadlineHit;
+      }
+    }
+    profile.tacticalMs = 0;
+    profile.tacticalCount = 0;
+    profile.tacticalTargetLayouts = 0;
+    profile.padOpportunities = [];
+    profile.padSpecialists = [];
+    if (limits.name === "hard") {
+      for (const tacticalMode of ["reverse", "slow"]) {
+        const tacticalStartedAt = nowMs();
+        const tactical = tacticalMode === "reverse"
+          ? buildTacticalPortfolioRollout(snapshot, {
+              mode: tacticalMode,
+              maxBuildMs: 1800,
+              candidateLimit: 8,
+              rolloutLimit: 20,
+              deterministicBudget
+            })
+          : buildExactTacticalRollout(snapshot, {
+              mode: tacticalMode,
+              maxBuildMs: 1800,
+              candidateLimit: 16,
+              specialPlacementDepth: 3,
+              deterministicBudget
+            });
+        profile.tacticalMs += nowMs() - tacticalStartedAt;
+        if (!tactical || !Number.isFinite(tactical.simulatedTime)) continue;
+        const tacticalPath = analyzePath(tactical.grid);
+        finalists.push({
+          ...tactical,
+          candidateSource: `tactical-${tacticalMode}`,
+          heuristicScore: 0,
+          structureContacts: routeBarrierContact(tactical.grid, tacticalPath?.path),
+          existingStructureContacts: existingStructureContact(context.baseGrid, tacticalPath?.path)
+        });
+        profile.tacticalCount++;
+        profile.tacticalTargetLayouts += tactical.profile?.targetLayouts || 0;
+      }
+      if (padAwareTactics) {
+        const padAnalysis = analyzePadOpportunities(snapshot.baseGrid);
+        const specialistLimit = Math.max(0, Math.min(4, snapshot.padSpecialistLimit ?? 3));
+        const selectedOpportunities = padAnalysis.modes.slice(0, specialistLimit);
+        profile.padOpportunities = padAnalysis.modes.map((entry) => ({
+          mode: entry.mode,
+          score: entry.score,
+          targets: entry.targets.length
+        }));
+        for (const opportunity of selectedOpportunities) {
+          const tacticalStartedAt = nowMs();
+          const tactical = buildPadTacticalBeam(snapshot, {
+            mode: opportunity.mode,
+            analysis: padAnalysis,
+            maxBuildMs: 1500,
+            candidateLimit: 10,
+            beamWidth: 3,
+            deterministicBudget
+          });
+          profile.tacticalMs += nowMs() - tacticalStartedAt;
+          profile.padSpecialists.push({
+            mode: opportunity.mode,
+            opportunityScore: opportunity.score,
+            elapsedMs: nowMs() - tacticalStartedAt,
+            score: tactical?.simulatedTime ?? null,
+            targetLayouts: tactical?.profile?.targetLayouts || 0
+          });
+          if (!tactical || !Number.isFinite(tactical.simulatedTime)) continue;
+          const tacticalPath = analyzePath(tactical.grid);
+          finalists.push({
+            ...tactical,
+            candidateSource: `pad-${opportunity.mode}`,
+            heuristicScore: 0,
+            structureContacts: routeBarrierContact(tactical.grid, tacticalPath?.path),
+            existingStructureContacts: existingStructureContact(context.baseGrid, tacticalPath?.path)
+          });
+          profile.tacticalCount++;
+          profile.tacticalTargetLayouts += tactical.profile?.targetLayouts || 0;
+        }
+      }
+    }
+    finalists.sort((a, b) => b.simulatedTime - a.simulatedTime || b.heuristicScore - a.heuristicScore);
+    profile.finalists = finalists.length;
+    let chosenIndex = limits.finalistRank || 0;
+    if (chosenIndex >= finalists.length) chosenIndex = 0;
+    const refinementStartedAt = nowMs();
+    const refinementCandidates = [];
+    const established = finalists.find((candidate) => !String(candidate.candidateSource || "").startsWith("pad-"));
+    if (established) refinementCandidates.push(established);
+    if (padAwareTactics) {
+      const specialist = finalists.find((candidate) => String(candidate.candidateSource || "").startsWith("pad-"));
+      if (specialist && specialist !== established) refinementCandidates.push(specialist);
+    }
+    if (!refinementCandidates.length) {
+      const fallback = finalists[chosenIndex] || materializeSearchFinalist(initialState, context);
+      if (fallback) refinementCandidates.push(fallback);
+    }
+    let refinementEvaluations = 0;
+    let refinements = 0;
+    for (const candidate of refinementCandidates) {
+      const refinement = refineFinalLayout(candidate, context);
+      refinementEvaluations += refinement.evaluations;
+      refinements += refinement.changed;
+    }
+    finalists.sort((a, b) => b.simulatedTime - a.simulatedTime || b.heuristicScore - a.heuristicScore);
+    const best = finalists[chosenIndex] || refinementCandidates[0];
+    if (!best) return finishBuild(buildLegacyAiLayoutFromSnapshot(snapshot));
+    profile.chosenCandidate = best.candidateSource || "bounded-search";
+    profile.refinementMs = nowMs() - refinementStartedAt;
+    profile.refinementEvaluations = refinementEvaluations;
+    profile.refinements = refinements;
+    profile.padRefinementMs = 0;
+    profile.padRefinementEvaluations = 0;
+    profile.padRefinements = 0;
+    if (padAwareTactics && snapshot.padAwareRefinement !== false && limits.name === "hard") {
+      const padRefinementStartedAt = nowMs();
+      const padRefinement = refinePadAwareLayout(best, context, analyzePadOpportunities(context.baseGrid));
+      profile.padRefinementMs = nowMs() - padRefinementStartedAt;
+      profile.padRefinementEvaluations = padRefinement.evaluations;
+      profile.padRefinements = padRefinement.changed;
+    }
+    const withoutHazardGrid = cloneGrid(best.grid);
+    if (best.special?.cell) withoutHazardGrid[best.special.cell.y][best.special.cell.x] = CELL_EMPTY;
+    ensureOpenings(withoutHazardGrid);
+    const withoutHazardStartedAt = nowMs();
+    const withoutHazardTime = simulateRunnerTime(withoutHazardGrid, null, neutralSpecials);
+    profile.simulationMs += nowMs() - withoutHazardStartedAt;
+    const outcomeStartedAt = nowMs();
+    const simulatedOutcome = simulateRunnerOutcome(best.grid, best.special, neutralSpecials);
+    profile.simulationMs += nowMs() - outcomeStartedAt;
+    profile.placements = best.placementOrder.length;
+    profile.totalMs = nowMs() - buildStartedAt;
+    profile.secondaryMs =
+      (profile.rolloutMs || 0) +
+      (profile.tacticalMs || 0) +
+      (profile.refinementMs || 0) +
+      (profile.padRefinementMs || 0);
+    profile.specialMs = Math.max(0, profile.totalMs - profile.placementMs - profile.simulationMs);
+    profile.quality = {
+      simulatedTime: best.simulatedTime,
+      hazardPlaced: !!best.special?.placed,
+      hazardImpact: Number.isFinite(withoutHazardTime) ? best.simulatedTime - withoutHazardTime : 0,
+      structureContacts: best.structureContacts,
+      existingStructureContacts: best.existingStructureContacts,
+      triggeredPads: simulatedOutcome?.triggeredPads || { speed: 0, slow: 0, detour: 0, stone: 0, rewind: 0 },
+      padDiagnostics: simulatedOutcome?.diagnostics || null,
+      wallsUsed: best.wallsUsed,
+      singlesUsed: best.singlesUsed
+    };
+    return finishBuild({
+      grid: best.grid,
+      special: best.special,
+      placementOrder: best.placementOrder,
+      profile,
+      simulatedTime: best.simulatedTime,
+      branchId: null,
+      branch: null,
+      branchPlacementIndex: null,
+      branchTotal: 1,
+      lookaheadUsed: profile.lookaheadUsed
+    });
+  }
+
+  function buildLegacyAiLayoutFromSnapshot(snapshot) {
+    const buildStartedAt = nowMs();
     const aiWeights = { ...AI_WEIGHT_DEFAULTS, ...(snapshot.aiWeights || {}) };
     const rng = snapshot.rng || mulberry32(snapshot.rngSeed >>> 0);
     const baseState = {
@@ -1529,7 +4120,15 @@
     const best = layouts
       .filter(Boolean)
       .sort((a, b) => (b.simulatedTime ?? -Infinity) - (a.simulatedTime ?? -Infinity))[0];
-    return best || finalizeLayout(baseState);
+    const result = best || finalizeLayout(baseState);
+    if (result) {
+      result.profile = {
+        ...(result.profile || {}),
+        totalMs: nowMs() - buildStartedAt,
+        source: "ai-core"
+      };
+    }
+    return result;
   }
 
   function computeBranchPlacementIndex(state) {
@@ -1696,9 +4295,12 @@
 
   function finalizeLayout(state) {
     if (!state) return null;
+    const finalizeStartedAt = nowMs();
     ensureOpenings(state.grid);
+    const reclaimStartedAt = nowMs();
     reduceMandatorySpeedPads(state.grid, state.special, state.neutralSpecials, 0, state.aiWeights, state.baseGrid);
     const reclaimStats = reclaimAndReallocateBlocks(state.grid, state.special, state.neutralSpecials, state.placementOrder, state.aiWeights, state.baseGrid, state.rng);
+    const reclaimMs = nowMs() - reclaimStartedAt;
     state.placementOrder.reallocations = reclaimStats.reallocated || 0;
     state.placementOrder.reallocationPasses = reclaimStats.passes || 0;
     annotatePlacementImpacts(state.grid, state.special, state.neutralSpecials, state.placementOrder);
@@ -1710,13 +4312,18 @@
       totalMs: 0,
       placementMs: 0,
       specialMs: 0,
-      reclaimMs: 0,
+      reclaimMs,
+      simulationMs: 0,
       lookaheadUsed: 0,
       branch: branchPlacementIndex ?? null,
       placements: state.placementOrder.length,
       source: "ai-core"
     };
+    const simulationStartedAt = nowMs();
     const simulatedTime = simulateRunnerTime(state.grid, state.special, state.neutralSpecials);
+    profile.simulationMs = nowMs() - simulationStartedAt;
+    profile.totalMs = nowMs() - finalizeStartedAt;
+    profile.placementMs = Math.max(0, profile.totalMs - profile.reclaimMs - profile.simulationMs);
     const lookaheadUsed = profile.lookaheadUsed || 0;
     return {
       grid: state.grid,
@@ -1782,6 +4389,30 @@
       y = nextY;
     }
     return distance;
+  }
+
+  function computeSpeedExposurePenalty(grid, pathInfo) {
+    if (!pathInfo?.path?.length) return 0;
+    const hits = [];
+    const seen = new Set();
+    let distance = 0;
+    for (let index = 0; index < pathInfo.path.length; index++) {
+      if (index > 0) distance += pathInfo.lengths[index - 1] || 0;
+      const cell = pathInfo.path[index];
+      if (padTypeFromCell(grid[cell.y]?.[cell.x]) !== "speed") continue;
+      const signature = keyFor(cell.x, cell.y);
+      if (seen.has(signature)) continue;
+      seen.add(signature);
+      hits.push(distance / NPC_SPEED);
+    }
+    let penalty = hits.length * PANEL_EFFECT_DURATION * (PANEL_FAST_MULT - 1);
+    for (let index = 1; index < hits.length; index++) {
+      const separation = hits[index] - hits[index - 1];
+      if (separation < PANEL_EFFECT_DURATION) {
+        penalty += (PANEL_EFFECT_DURATION - Math.max(0, separation)) * (PANEL_FAST_MULT - 1);
+      }
+    }
+    return penalty;
   }
 
   function computePadSlowTime(grid, pathInfo) {
@@ -2031,9 +4662,8 @@
       const dx = special.cell.x + 0.5 - center.x;
       const dy = special.cell.y + 0.5 - center.y;
       const dist = Math.hypot(dx, dy);
-      if (dist <= SPECIAL_RADIUS) {
-        const ratio = Math.max(0, Math.min(1, dist / SPECIAL_RADIUS));
-        const target = GRAVITY_MIN_MULT + (GRAVITY_MAX_MULT - GRAVITY_MIN_MULT) * ratio;
+      if (dist <= GRAVITY_RADIUS) {
+        const target = pressureFieldMultiplier(dist);
         total += baseTime * (1 / target - 1);
       }
     });
@@ -2139,15 +4769,24 @@
     return { time: predictedTime, baseTime, lightningPenalty, components };
   }
 
-  function simulateRunnerTime(grid, special, neutralSpecials = []) {
+  function simulateRunnerOutcome(grid, special, neutralSpecials = [], options = {}) {
     if (!grid) return null;
+    if (activeGenerationMetrics) {
+      activeGenerationMetrics.simulations++;
+      if (options.diagnostics !== false) activeGenerationMetrics.diagnosticSimulations++;
+    }
     const simGrid = cloneGrid(grid);
     ensureOpenings(simGrid);
+    const collectDiagnostics = options.diagnostics !== false;
     const runner = createRunner(
       "AI",
       simGrid,
       special ? cloneSpecial(special) : null,
-      cloneNeutralSpecials(neutralSpecials)
+      cloneNeutralSpecials(neutralSpecials),
+      {
+        path: options.path || options.pathInfo?.path || null,
+        diagnostics: collectDiagnostics
+      }
     );
     if (!runner.path.length) return null;
     const dt = FIXED_TIMESTEP;
@@ -2158,129 +4797,37 @@
       advanceRunnerSimulation(runner, dt);
       steps++;
     }
+    if (activeGenerationMetrics) activeGenerationMetrics.simulationSteps += steps;
     if (!runner.finished) return null;
-    return runner.resultTime ?? runner.elapsedTime ?? steps * dt;
-  }
-
-  // Reclaim/annotate helpers (simplified)
-  function reclaimAndReallocateBlocks(grid, special, neutralSpecials, placementOrder = []) {
-    if (!grid || !placementOrder || !placementOrder.length) return { reallocated: 0, passes: 0 };
-    let reallocated = 0;
-    let passes = 0;
-    for (let pass = 0; pass < 1; pass++) {
-      passes++;
-      const baseline = evaluateGridForAi(grid, special, neutralSpecials, null, aiWeights, baseGrid);
-      if (baseline == null) break;
-      const remaining = [];
-      let reclaimedAny = false;
-      for (const entry of placementOrder) {
-        const x = entry.column != null ? entry.column - 1 : entry.x;
-        const y = entry.row != null ? entry.row - 1 : entry.y;
-        if (entry.type === "wall") {
-          const prev = {
-            tl: grid[y][x],
-            tr: grid[y][x + 1],
-            bl: grid[y + 1][x],
-            br: grid[y + 1][x + 1]
-          };
-          clearBlock(grid, x, y);
-          ensureOpenings(grid);
-          if (!hasPath(grid)) {
-            grid[y][x] = prev.tl;
-            grid[y][x + 1] = prev.tr;
-            grid[y + 1][x] = prev.bl;
-            grid[y + 1][x + 1] = prev.br;
-            ensureOpenings(grid);
-            remaining.push(entry);
-            continue;
-          }
-          const score = simulateRunnerTime(grid, special, neutralSpecials);
-          if (score <= baseline) {
-            placeBlock(grid, x, y, CELL_PLAYER);
-            ensureOpenings(grid);
-            remaining.push(entry);
-          } else {
-            reclaimedAny = true;
-            reallocated++;
-          }
-        } else if (entry.type === "single") {
-          const prev = grid[y][x];
-          grid[y][x] = CELL_EMPTY;
-          ensureOpenings(grid);
-          if (!hasPath(grid)) {
-            grid[y][x] = prev;
-            ensureOpenings(grid);
-            remaining.push(entry);
-            continue;
-          }
-          const score = simulateRunnerTime(grid, special, neutralSpecials);
-          if (score <= baseline) {
-            grid[y][x] = prev;
-            ensureOpenings(grid);
-            remaining.push(entry);
-          } else {
-            reclaimedAny = true;
-            reallocated++;
-          }
-        } else if (entry.type === "special" && special?.cell) {
-          const sx = special.cell.x;
-          const sy = special.cell.y;
-          grid[sy][sx] = CELL_EMPTY;
-          ensureOpenings(grid);
-          if (!hasPath(grid)) {
-            grid[sy][sx] = CELL_SPECIAL;
-            remaining.push(entry);
-            continue;
-          }
-          const score = simulateRunnerTime(grid, special, neutralSpecials);
-          if (score <= baseline) {
-            grid[sy][sx] = CELL_SPECIAL;
-            remaining.push(entry);
-            ensureOpenings(grid);
-          } else {
-            special.placed = false;
-            special.cell = null;
-            reclaimedAny = true;
-          }
+    let triggeredPads = null;
+    let diagnostics = null;
+    if (collectDiagnostics) {
+      triggeredPads = { speed: 0, slow: 0, detour: 0, stone: 0, rewind: 0 };
+      for (let y = 0; y < GRID_SIZE; y++) {
+        for (let x = 0; x < GRID_SIZE; x++) {
+          if (!isPadActiveCell(grid[y][x]) || isPadActiveCell(simGrid[y][x])) continue;
+          const type = padTypeFromCell(grid[y][x]);
+          if (type && Object.prototype.hasOwnProperty.call(triggeredPads, type)) triggeredPads[type]++;
         }
       }
-      placementOrder.length = 0;
-      placementOrder.push(...remaining);
-      if (!reclaimedAny) break;
+      diagnostics = {
+        ...runner.diagnostics,
+        padEvents: runner.diagnostics.padEvents.map((event) => ({ ...event }))
+      };
     }
-    return { reallocated, passes };
+    return {
+      time: runner.resultTime ?? runner.elapsedTime ?? steps * dt,
+      triggeredPads,
+      diagnostics,
+      path: runner.initialPath
+    };
   }
 
-  function annotatePlacementImpacts(grid, special, neutralSpecials, placementOrder = []) {
-    if (!grid || !placementOrder?.length) return placementOrder;
-    const baseline = simulateRunnerTime(grid, special, neutralSpecials);
-    if (baseline == null) return placementOrder;
-    placementOrder.forEach((entry) => {
-      const x = entry.column != null ? entry.column - 1 : entry.x;
-      const y = entry.row != null ? entry.row - 1 : entry.y;
-      let sim = baseline;
-      if (entry.type === "wall") {
-        const testGrid = cloneGrid(grid);
-        clearBlock(testGrid, x, y);
-        ensureOpenings(testGrid);
-        if (hasPath(testGrid)) sim = simulateRunnerTime(testGrid, special, neutralSpecials);
-      } else if (entry.type === "single") {
-        const testGrid = cloneGrid(grid);
-        testGrid[y][x] = CELL_EMPTY;
-        ensureOpenings(testGrid);
-        if (hasPath(testGrid)) sim = simulateRunnerTime(testGrid, special, neutralSpecials);
-      } else if (entry.type === "special" && special?.cell) {
-        const testGrid = cloneGrid(grid);
-        testGrid[special.cell.y][special.cell.x] = CELL_EMPTY;
-        ensureOpenings(testGrid);
-        if (hasPath(testGrid)) sim = simulateRunnerTime(testGrid, special, neutralSpecials);
-      }
-      entry.impactDelta = baseline - (sim || baseline);
-    });
-    return placementOrder;
+  function simulateRunnerTime(grid, special, neutralSpecials = [], options = {}) {
+    return simulateRunnerOutcome(grid, special, neutralSpecials, { ...options, diagnostics: false })?.time ?? null;
   }
 
-  // Reclaim/annotate helpers (full logic, overrides simplified versions)
+  // Legacy reclaim/annotate helpers used only by the comparison builder.
   function reclaimAndReallocateBlocks(
     grid,
     special,
@@ -2525,9 +5072,7 @@
         const testGrid = cloneGrid(grid);
         clearBlock(testGrid, x, y);
         ensureOpenings(testGrid);
-        if (hasPath(testGrid)) {
-          sim = simulateRunnerTime(testGrid, special, neutralSpecials);
-        }
+        sim = simulateRunnerTime(testGrid, special, neutralSpecials);
       } else if (entry.type === "single") {
         if (grid[y]?.[x] !== CELL_SINGLE) {
           entry.impactDelta = 0;
@@ -2536,9 +5081,7 @@
         const testGrid = cloneGrid(grid);
         testGrid[y][x] = CELL_EMPTY;
         ensureOpenings(testGrid);
-        if (hasPath(testGrid)) {
-          sim = simulateRunnerTime(testGrid, special, neutralSpecials);
-        }
+        sim = simulateRunnerTime(testGrid, special, neutralSpecials);
       } else if (entry.type === "special") {
         if (!special?.placed || special.cell == null) {
           entry.impactDelta = 0;
@@ -2550,9 +5093,7 @@
         const sy = special.cell.y;
         testGrid[sy][sx] = CELL_EMPTY;
         ensureOpenings(testGrid);
-        if (hasPath(testGrid)) {
-          sim = simulateRunnerTime(testGrid, testSpecial, neutralSpecials);
-        }
+        sim = simulateRunnerTime(testGrid, testSpecial, neutralSpecials);
       }
       entry.impactDelta = baseline - (sim ?? baseline);
     });
@@ -2662,10 +5203,95 @@
 
   // Export
   global.AICore = {
+    rulesVersion: "2.0.0",
+    aiVersion: AI_VERSION,
+    constants: Object.freeze({
+      GRID_SIZE,
+      ENTRANCE_X,
+      NPC_SPEED,
+      NPC_RADIUS,
+      FIXED_TIMESTEP,
+      PANEL_EFFECT_DURATION,
+      PANEL_SLOW_MULT,
+      PANEL_FAST_MULT,
+      MEDUSA_SLOW_MULT,
+      SPECIAL_RADIUS,
+      GRAVITY_RADIUS,
+      SPECIAL_LINGER,
+      SPECIAL_SLOW_MULT,
+      FREEZING_BUILDUP,
+      FREEZING_MIN_MULT,
+      LIGHTNING_STUN,
+      LIGHTNING_COOLDOWN,
+      LIGHTNING_EFFECT_RADIUS,
+      GRAVITY_MIN_MULT,
+      GRAVITY_MAX_MULT,
+      GRAVITY_CURVE_EXPONENT
+    }),
+    cells: Object.freeze({
+      EMPTY: CELL_EMPTY,
+      STATIC: CELL_STATIC,
+      PLAYER: CELL_PLAYER,
+      SPEED: CELL_SPEED,
+      SLOW: CELL_SLOW,
+      SPEED_USED: CELL_SPEED_USED,
+      SLOW_USED: CELL_SLOW_USED,
+      SPECIAL: CELL_SPECIAL,
+      DETOUR: CELL_DETOUR,
+      STONE: CELL_STONE,
+      REWIND: CELL_REWIND,
+      DETOUR_USED: CELL_DETOUR_USED,
+      STONE_USED: CELL_STONE_USED,
+      REWIND_USED: CELL_REWIND_USED,
+      SINGLE: CELL_SINGLE,
+      STATIC_SPECIAL: CELL_STATIC_SPECIAL
+    }),
     buildAiLayoutFromSnapshot,
+    buildLegacyAiLayoutFromSnapshot,
+    buildRouteRolloutFromSnapshot,
+    buildExactTacticalRollout,
+    buildTacticalBeamRollout,
+    buildPadTacticalBeam,
+    buildMotifBeamRollout,
+    buildTacticalPortfolioRollout,
+    resolveAiSearchProfile,
+    createRound,
+    generateBaseGrid,
+    createEmptyGrid,
+    createSpecialTemplate,
+    createNeutralSpecial,
+    pickSpecialType,
+    pressureFieldMultiplier,
+    advanceBuildClock,
+    resetPadStates,
+    createRunner,
+    advanceRunnerSimulation,
+    updateRunnerEffects,
     mulberry32,
     hashSeed,
     randomInt,
+    cloneGrid,
+    cloneSpecial,
+    cloneNeutralSpecials,
+    computePath,
+    computePathFromCell,
+    findPath,
+    hasPath,
+    analyzePath,
+    computeSegmentLengths,
+    ensureOpenings,
+    isInsideGrid,
+    isWalkableCell,
+    canPlaceBlock,
+    canPlaceSingle,
+    placeBlock,
+    clearBlock,
+    countBlocks,
+    countCells,
+    isCellAvailableForSpecial,
+    isPadCell,
+    padTypeFromCell,
+    isPointInsideSpecial,
     padIsMandatory,
     countMandatorySpeedPads,
     keyFor,
@@ -2679,6 +5305,7 @@
     generateRandomSingleCandidates,
     reduceMandatorySpeedPads,
     collectMandatorySpeedPads,
+    analyzePadOpportunities,
     getDiversionCandidates,
     tryDivertSpeedPad,
     listAiWallOrigins,
@@ -2687,6 +5314,7 @@
     collectAiTimeComponents,
     computeSpecialUsageTimes,
     computePadSlowTime,
+    computeSpeedExposurePenalty,
     computeSlowStackTime,
     computeDetourDistance,
     computeSlowPadProximityReward,
@@ -2698,6 +5326,7 @@
     estimateSpecialPadSynergyTime,
     estimateSpecialOverlapTime,
     simulateRunnerTime,
+    simulateRunnerOutcome,
     reclaimAndReallocateBlocks,
     annotatePlacementImpacts,
     optimizeBlockReallocation

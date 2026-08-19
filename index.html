@@ -2,134 +2,252 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Seeded Grid Runner</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#07110f" />
+  <title>Outmaze</title>
   <link rel="stylesheet" href="style.css" />
   <link
     rel="icon"
-    href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'></svg>"
+    href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%2307110f'/><path d='M3 3h10v10H3zM6 3v7h4V6' fill='none' stroke='%2378f7bb' stroke-width='2'/></svg>"
   />
 </head>
 <body>
+  <div id="gameAnnouncer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+
   <div id="menuOverlay" class="menu-overlay">
-    <div class="menu-card">
-      <h1>Grid Rush</h1>
-      <button id="menuSingle">Race vs AI</button>
-      <button id="menuVs">Player vs Player</button>
-      <button id="menuQuit">Quit</button>
+    <div class="menu-card menu-card--home">
+      <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+      <p class="eyebrow">Strategy maze racing</p>
+      <h1>Outmaze</h1>
+      <p class="menu-tagline">Build the maze that lasts.</p>
+      <p class="menu-objective">
+        Shape their route by placing walls and hazards within a randomised environment—the
+        <strong>longest escape time wins</strong>.
+      </p>
+      <div class="menu-actions">
+        <button id="menuSingle" class="button button--primary button--large" type="button">Race the AI</button>
+        <button id="menuHowTo" class="button button--quiet" type="button">How to play</button>
+        <button id="menuVs" class="button button--quiet" type="button" aria-describedby="multiplayerNote">
+          Play a friend
+        </button>
+      </div>
+      <p id="multiplayerNote" class="menu-footnote">Create a private room and race another player on the same seed.</p>
     </div>
   </div>
 
-  <div id="loadingOverlay" class="menu-overlay hidden">
-    <div class="menu-card">
-      <p id="loadingText">Preparing...</p>
+  <div id="loadingOverlay" class="menu-overlay hidden" aria-live="assertive">
+    <div class="menu-card loading-card">
+      <span class="loading-spinner" aria-hidden="true"></span>
+      <p id="loadingText">Preparing your seed…</p>
     </div>
   </div>
 
-  <div id="pauseOverlay" class="menu-overlay hidden">
+  <div id="pauseOverlay" class="menu-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="pauseTitle">
     <div class="menu-card">
-      <h2>Paused</h2>
-      <button id="resumeBtn">Resume</button>
-      <button id="pauseMenuBtn">Main Menu</button>
+      <p class="eyebrow">Outmaze</p>
+      <h2 id="pauseTitle">Paused</h2>
+      <button id="resumeBtn" class="button button--primary" type="button">Resume</button>
+      <button id="pauseMenuBtn" class="button button--quiet" type="button">Return to main menu</button>
     </div>
   </div>
 
-  <main class="layout">
-    <div id="statusBoard" class="status-board hidden">
+  <div id="tutorialOverlay" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="tutorialTitle">
+    <div class="tutorial-card">
+      <button id="closeTutorial" class="icon-button modal-close" type="button" aria-label="Close how to play">&#215;</button>
+      <p class="eyebrow">The essentials</p>
+      <h2 id="tutorialTitle">How to outmaze your opponent</h2>
+      <p class="tutorial-lead">You are not trying to escape. You are designing the slower maze.</p>
+      <ol class="tutorial-steps">
+        <li>
+          <span class="step-number">1</span>
+          <div><strong>Shape the maze.</strong><p>The runner ignores hazards when choosing a path. It simply takes the shortest open route to the finish.</p></div>
+        </li>
+        <li>
+          <span class="step-number">2</span>
+          <div><strong>Force painful pathing.</strong><p>Use 2×2 walls for structure, 1×1 walls for precise choke points, and hazards to disrupt your runner and force a slower escape time.</p></div>
+        </li>
+        <li>
+          <span class="step-number">3</span>
+          <div><strong>Make every second count.</strong><p>Effects stack - shape your maze to combine the effects of hazards to slow your runner. You may leave walls or your hazard unused and start whenever you are ready. The longer runner time wins.</p></div>
+        </li>
+      </ol>
+      <div class="tutorial-controls">
+        <p><kbd>1</kbd> walls · <kbd>2</kbd> singles · <kbd>3</kbd> hazard · <kbd>Enter</kbd> place · <kbd>Delete</kbd> refund</p>
+        <button id="tutorialStart" class="button button--primary" type="button">Got it</button>
+      </div>
+    </div>
+  </div>
+
+  <main id="gameApp" class="layout" aria-label="Outmaze game">
+    <header id="gameHeader" class="game-header hidden">
+      <a class="game-brand" href="#" id="brandHome" aria-label="Outmaze main menu">
+        <span class="brand-mark brand-mark--mini" aria-hidden="true"><span></span><span></span><span></span></span>
+        <span>Outmaze</span>
+      </a>
+      <nav class="game-nav" aria-label="Game controls">
+        <button id="helpButton" class="text-button" type="button">How to play</button>
+        <button id="catalogueButton" class="text-button" type="button">Game guide</button>
+        <button id="menuButton" class="text-button" type="button">Main menu</button>
+      </nav>
+    </header>
+
+    <section id="statusBoard" class="status-board hidden" aria-label="Current round status">
+      <div class="phase-panel">
+        <p class="status-label">Current phase</p>
+        <h2 id="phase">Build your maze</h2>
+        <p id="phaseHint">Keep your runner trapped longer than the AI.</p>
+      </div>
+
       <div class="timer-panel">
-        <div class="panel-header">
-          <div class="panel-title" id="timerStatus">--</div>
-          <span class="panel-line"></span>
+        <div id="timerStatus" class="status-label">Build time</div>
+        <div id="timer" class="timer-value">60.0s</div>
+      </div>
+
+      <div id="score" class="score-panel" aria-live="polite">Longest time wins</div>
+    </section>
+
+    <section id="vsPanel" class="vs-panel hidden" aria-label="Two-player match controls">
+      <div class="vs-panel-heading">
+        <div>
+          <p class="info-kicker">Two-player race</p>
+          <h3 id="vsPanelTitle">Create or join a private room</h3>
         </div>
-        <div class="timer-value" id="timer">--</div>
-      </div>
-      <div class="mini-currency">
-        <button id="wallsCard" class="mini-card walls" type="button">
-          <div class="panel-header">
-            <div class="panel-title">WALLS</div>
-            <span class="panel-line"></span>
-          </div>
-          <div class="mini-value" id="wallsValue">--</div>
-        </button>
-        <button id="singleCard" class="mini-card single" type="button">
-          <div class="panel-header">
-            <div class="panel-title">SINGLE</div>
-            <span class="panel-line"></span>
-          </div>
-          <div class="mini-value" id="singleValue">--</div>
-        </button>
-        <button id="specialCard" class="mini-card special" type="button">
-          <div class="panel-header">
-            <div class="panel-title">SPECIAL</div>
-            <span class="panel-line"></span>
-          </div>
-          <div class="special-preview">
-            <canvas id="specialPreview" width="30" height="30"></canvas>
-            <span id="specialValue" class="sr-only">--</span>
-          </div>
+        <button id="vsCopyRoom" class="vs-room-badge hidden" type="button" title="Copy room code">
+          Room <strong id="vsRoomCode">-----</strong>
         </button>
       </div>
-    </div>
-    <div class="canvas-wrapper">
-      <canvas id="game"></canvas>
-    </div>
-    <section class="hud hidden" id="gameHud">
-      <div class="controls">
-        <label class="seed-field">
-          <span>Seed</span>
-          <input id="seedInput" type="text" />
+      <p id="vsStatus" class="vs-status" role="status" aria-live="polite">Connecting to the Outmaze server…</p>
+      <div id="vsLobbyActions" class="vs-lobby-actions">
+        <button id="vsCreate" class="button button--primary" type="button">Create room</button>
+        <span class="vs-divider">or</span>
+        <label class="vs-room-field">
+          <span class="sr-only">Room code</span>
+          <input id="vsRoomInput" type="text" placeholder="Room code" maxlength="5" autocomplete="off" autocapitalize="characters" spellcheck="false" />
         </label>
-        <button id="setSeed" type="button">Set Seed</button>
-        <button id="randomSeed" type="button">New Seed</button>
-        <button id="newGame" type="button">Restart</button>
-        <button id="editRetry" type="button">Edit & Retry</button>
-        <button id="menuButton" type="button">Main Menu</button>
-        <button id="catalogueButton" type="button" class="catalogue-button">Catalogue</button>
-        <button id="vsToggle" type="button" class="catalogue-button vs-only">Versus</button>
+        <button id="vsJoin" class="button button--quiet" type="button">Join room</button>
+        <button id="vsReadyBtn" class="button button--primary hidden" type="button">Ready</button>
       </div>
-      <div class="vs-panel hidden vs-only" id="vsPanel">
-        <div class="vs-row">
-          <button id="vsCreate" type="button">Create</button>
-          <input id="vsRoomInput" type="text" placeholder="Room code" />
-          <button id="vsJoin" type="button">Join</button>
-          <button id="vsReadyBtn" type="button">Ready</button>
-        </div>
-        <div class="vs-status" id="vsStatus">VS: disconnected</div>
-        <div class="vs-rematch">
-          <button id="vsTryAgain" type="button">Try again (same seed)</button>
-          <button id="vsNewGame" type="button">New round (new seed)</button>
-          <span id="vsChoiceStatus"></span>
-        </div>
+      <div id="vsMatchActions" class="vs-match-actions hidden">
+        <button id="vsEarlyStartBtn" class="button button--quiet" type="button">Suggest early start</button>
+        <span id="vsEarlyStartStatus">You: — | Opponent: —</span>
       </div>
-      <div class="hud-notes ai-only">
-        <p>
-          Spend your WALLS card on chunky 2x2 blockers, use the SINGLE card for precise 1x1 plugs, and drop the SPECIAL to lock in your signature trap. Right-click placed walls or singles to refund them.
-        </p>
+      <div id="vsRematchActions" class="vs-rematch hidden">
+        <span>Next round:</span>
+        <button id="vsTryAgain" class="button button--quiet" type="button">Modify current maze</button>
+        <button id="vsNewGame" class="button button--quiet" type="button">New seed</button>
+        <span id="vsChoiceStatus"></span>
+      </div>
+      <button id="vsLeave" class="text-button vs-leave hidden" type="button">Leave room</button>
+    </section>
+
+    <section id="resourceToolbar" class="resource-toolbar hidden" aria-label="Build tools">
+      <button id="wallsCard" class="resource-card resource-card--walls" type="button" aria-keyshortcuts="1" aria-describedby="toolDetailBody">
+        <span class="resource-key" aria-hidden="true">1</span>
+        <span class="resource-icon resource-icon--wall" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <span class="resource-copy"><strong>Walls</strong><small>2×2 structure</small></span>
+        <span id="wallsValue" class="resource-count">--</span>
+      </button>
+
+      <button id="singleCard" class="resource-card resource-card--single" type="button" aria-keyshortcuts="2" aria-describedby="toolDetailBody">
+        <span class="resource-key" aria-hidden="true">2</span>
+        <span class="resource-icon resource-icon--single" aria-hidden="true"></span>
+        <span class="resource-copy"><strong>Single</strong><small>1×1 precision</small></span>
+        <span id="singleValue" class="resource-count">--</span>
+      </button>
+
+      <button id="specialCard" class="resource-card resource-card--special" type="button" aria-keyshortcuts="3" aria-describedby="toolDetailBody">
+        <span class="resource-key" aria-hidden="true">3</span>
+        <span class="special-preview" aria-hidden="true"><canvas id="specialPreview" width="30" height="30"></canvas></span>
+        <span class="resource-copy"><strong id="specialCardName">Hazard</strong><small id="specialCardEffect">Signature disruption</small></span>
+        <span id="specialValue" class="resource-count">--</span>
+      </button>
+
+      <div class="start-control">
+        <button id="startRace" class="button button--start" type="button">Start now</button>
       </div>
     </section>
-  </main>
-    <div id="resultPopup" class="result-popup hidden">
-      <div class="result-card">
-        <button id="closePopup" class="close-popup" aria-label="Close result">&#215;</button>
-        <div id="popupEmoji" class="result-emoji">&#128578;</div>
-        <p id="popupMessage">You win!</p>
-        <button id="shareResult" class="share-button" type="button">Share Result</button>
+
+    <div id="gameBody" class="game-body hidden">
+      <div id="canvasWrapper" class="canvas-wrapper build-view">
+        <canvas
+          id="game"
+          tabindex="0"
+          role="application"
+          aria-label="Interactive Outmaze construction grid"
+          aria-describedby="canvasInstructions"
+        ></canvas>
+        <p id="canvasInstructions" class="sr-only">
+          Use the mouse or touch to place the selected structure. Right-click or long-press to refund.
+          With the keyboard, move the build cursor using arrow keys, press Enter to place, and Delete to refund.
+        </p>
+        <div id="revealBanner" class="reveal-banner hidden" aria-live="assertive">
+          <span>Maze locked</span>
+          <strong>Revealing the AI</strong>
+        </div>
       </div>
+
+      <aside id="buildSidebar" class="build-sidebar" aria-label="Build information">
+        <section class="info-card tool-detail">
+          <p class="info-kicker">Selected tool</p>
+          <h3 id="toolDetailTitle">Walls</h3>
+          <p id="toolDetailBody">Place a 2×2 barrier. Build against existing obstacles to make every wall count.</p>
+        </section>
+
+        <section id="seedIntel" class="info-card seed-intel">
+          <div class="info-card-heading">
+            <div>
+              <p class="info-kicker">This seed</p>
+              <h3>Notable elements</h3>
+            </div>
+            <span id="seedLabel" class="seed-chip">--</span>
+          </div>
+          <ul id="notableList" class="notable-list"></ul>
+        </section>
+
+      </aside>
     </div>
 
-    <div id="catalogueOverlay" class="catalogue-overlay hidden">
-      <div class="catalogue-card">
-        <div class="catalogue-header">
-          <h2>Catalogue</h2>
-          <button id="closeCatalogue" aria-label="Close catalogue">&#215;</button>
+    <section class="hud hidden" id="gameHud" aria-label="Round options">
+      <details class="round-options">
+        <summary>Seed and round options</summary>
+        <div class="controls">
+          <label class="seed-field">
+            <span>Seed</span>
+            <input id="seedInput" type="text" autocomplete="off" spellcheck="false" />
+          </label>
+          <button id="setSeed" type="button">Load seed</button>
+          <button id="randomSeed" type="button">New seed</button>
+          <button id="newGame" type="button">Restart seed</button>
+          <button id="editRetry" type="button">Edit and retry</button>
         </div>
-        <div class="catalogue-list" id="catalogueList"></div>
-      </div>
+      </details>
+    </section>
+  </main>
+
+  <div id="resultPopup" class="result-popup hidden" role="dialog" aria-modal="true" aria-labelledby="popupMessage">
+    <div class="result-card">
+      <button id="closePopup" class="close-popup" type="button" aria-label="Close result">&#215;</button>
+      <p id="popupEyebrow" class="eyebrow">Round complete</p>
+      <div id="popupEmoji" class="result-emoji" aria-hidden="true">😄</div>
+      <p id="popupMessage">You win!</p>
+      <button id="shareResult" class="button button--primary share-button" type="button">Copy result</button>
     </div>
+  </div>
+
+  <div id="catalogueOverlay" class="catalogue-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="catalogueTitle">
+    <div class="catalogue-card">
+      <div class="catalogue-header">
+        <div>
+          <p class="eyebrow">Rules and effects</p>
+          <h2 id="catalogueTitle">Game guide</h2>
+        </div>
+        <button id="closeCatalogue" class="icon-button" type="button" aria-label="Close game guide">&#215;</button>
+      </div>
+      <div class="catalogue-list" id="catalogueList"></div>
+    </div>
+  </div>
+
   <script src="ai-core.js"></script>
   <script src="main.js"></script>
-  </body>
-  </html>
-
-
-
-
+</body>
+</html>
