@@ -14,8 +14,9 @@
     overlay: document.getElementById("profileOverlay"),
     close: document.getElementById("closeProfile"),
     signedOut: document.getElementById("profileSignedOut"),
-    google: document.getElementById("profileGoogleSignIn"),
+    anonymous: document.getElementById("profileAnonymousSignIn"),
     dev: document.getElementById("profileDevSignIn"),
+    lead: document.getElementById("profileLead"),
     authStatus: document.getElementById("profileAuthStatus"),
     form: document.getElementById("profileForm"),
     account: document.getElementById("profileAccount"),
@@ -59,6 +60,11 @@
     return id;
   }
 
+  function localUser() {
+    const uid = localPlayerId();
+    return { uid, email: `${uid}@local.outmaze` };
+  }
+
   function renderEmojiGrid() {
     if (!elements.emojis) return;
     elements.emojis.innerHTML = "";
@@ -88,9 +94,19 @@
     elements.signedOut?.classList.toggle("hidden", signedIn);
     elements.form?.classList.toggle("hidden", !signedIn);
     elements.dev?.classList.toggle("hidden", !isLocal);
-    if (elements.google) elements.google.classList.toggle("hidden", isLocal);
+    elements.anonymous?.classList.toggle("hidden", isLocal || signedIn || !state.initialized);
+    if (elements.lead) {
+      elements.lead.textContent = isLocal
+        ? "Local testing uses a separate test identity. The published game saves its profile automatically in each browser."
+        : "This browser keeps one name and emoji attached to friend rooms, parties, and Daily scores.";
+    }
+    elements.signOut?.classList.toggle("hidden", !isLocal);
     if (signedIn) {
-      if (elements.account) elements.account.textContent = isLocal ? "Local testing profile" : state.user.email || "Google account";
+      if (elements.account) {
+        elements.account.textContent = isLocal
+          ? "Local test identity · separate from the published game"
+          : "Saved automatically in this browser · clearing site data removes access";
+      }
       if (elements.name && document.activeElement !== elements.name) elements.name.value = state.profile?.name || "";
       state.selectedEmoji = state.profile?.emoji || state.selectedEmoji || EMOJIS[0];
       renderEmojiSelection();
@@ -153,7 +169,6 @@
   function open() {
     elements.overlay?.classList.remove("hidden");
     render();
-    setStatus(elements.authStatus, "");
     setStatus(elements.saveStatus, "");
     if (state.user && !state.profile) setTimeout(() => elements.name?.focus(), 0);
   }
@@ -170,20 +185,12 @@
     return new Promise((resolve) => state.pendingProfileRequests.push(resolve));
   }
 
-  async function signInGoogle() {
-    if (!firebaseConfigured()) {
-      setStatus(elements.authStatus, "Google sign-in needs its one-time Firebase setup.", true);
-      return;
-    }
-    setStatus(elements.authStatus, "Opening Google sign-in…");
-    try {
-      const provider = new state.authApi.GoogleAuthProvider();
-      provider.setCustomParameters({ prompt: "select_account" });
-      await state.authApi.signInWithPopup(state.auth, provider);
-      setStatus(elements.authStatus, "");
-    } catch (error) {
-      setStatus(elements.authStatus, error.code === "auth/popup-closed-by-user" ? "Sign-in was cancelled." : error.message, true);
-    }
+  async function signInLocal() {
+    state.user = localUser();
+    setStatus(elements.authStatus, "Opening local test profile…");
+    await loadProfile();
+    setStatus(elements.authStatus, "");
+    if (!state.profile) setTimeout(() => elements.name?.focus(), 0);
   }
 
   async function saveProfile(event) {
@@ -205,10 +212,12 @@
     }
   }
 
-  async function signOutCurrent() {
-    if (state.auth && state.authApi) await state.authApi.signOut(state.auth);
+  async function leaveLocalProfile() {
+    if (!isLocal) return;
     state.user = null;
     state.profile = null;
+    setStatus(elements.authStatus, "");
+    setStatus(elements.saveStatus, "");
     render();
     window.dispatchEvent(new CustomEvent("outmaze-profile-changed", { detail: null }));
   }
@@ -216,14 +225,13 @@
   async function initialize() {
     renderEmojiGrid();
     if (isLocal) {
-      const uid = localPlayerId();
-      state.user = { uid, email: `${uid}@local.outmaze` };
       state.initialized = true;
-      await loadProfile();
+      render();
       return;
     }
     if (!firebaseConfigured()) {
       state.initialized = true;
+      setStatus(elements.authStatus, "Browser profiles need their one-time Firebase setup.", true);
       render();
       return;
     }
@@ -233,11 +241,26 @@
     ]);
     state.authApi = authApi;
     state.auth = authApi.getAuth(initializeApp(config.firebase));
-    await new Promise((resolve) => {
+    await authApi.setPersistence(state.auth, authApi.browserLocalPersistence);
+    setStatus(elements.authStatus, "Preparing your browser profile…");
+    await new Promise((resolve, reject) => {
       let initial = true;
       authApi.onAuthStateChanged(state.auth, async (user) => {
+        if (!user) {
+          state.user = null;
+          state.profile = null;
+          render();
+          try {
+            await authApi.signInAnonymously(state.auth);
+          } catch (error) {
+            if (initial) reject(error);
+            else setStatus(elements.authStatus, error.message, true);
+          }
+          return;
+        }
         state.user = user;
         await loadProfile();
+        setStatus(elements.authStatus, "");
         if (initial) {
           initial = false;
           resolve();
@@ -249,14 +272,10 @@
 
   elements.menu?.addEventListener("click", open);
   elements.close?.addEventListener("click", () => close());
-  elements.google?.addEventListener("click", signInGoogle);
-  elements.dev?.addEventListener("click", () => {
-    render();
-    elements.form?.classList.remove("hidden");
-    setTimeout(() => elements.name?.focus(), 0);
-  });
+  elements.anonymous?.addEventListener("click", () => location.reload());
+  elements.dev?.addEventListener("click", () => signInLocal().catch((error) => setStatus(elements.authStatus, error.message, true)));
   elements.form?.addEventListener("submit", saveProfile);
-  elements.signOut?.addEventListener("click", signOutCurrent);
+  elements.signOut?.addEventListener("click", leaveLocalProfile);
   elements.overlay?.addEventListener("mousedown", (event) => {
     if (event.target === elements.overlay) close();
   });

@@ -16,6 +16,10 @@ const {
 const DEFAULT_PORT = Number(process.env.PORT || 8080);
 const DEFAULT_BUILD_SECONDS = 60;
 const DEFAULT_START_DELAY_MS = 0;
+const DEFAULT_AUTH_TIMEOUT_MS = 10 * 1000;
+const DEFAULT_IDLE_CONNECTION_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_ROOM_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_CLEANUP_INTERVAL_MS = 30 * 1000;
 const GRID_SIZE = 21;
 const MAX_CELL_VALUE = 15;
 const ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -236,6 +240,12 @@ function createOutmazeServer(options = {}) {
   });
   const dailyService = options.dailyService || createDailyService({ store });
   const requireProfiles = options.requireProfiles ?? process.env.REQUIRE_PROFILES === "true";
+  const authTimeoutMs = Number(options.authTimeoutMs ?? process.env.AUTH_TIMEOUT_MS ?? DEFAULT_AUTH_TIMEOUT_MS);
+  const idleConnectionTimeoutMs = Number(
+    options.idleConnectionTimeoutMs ?? process.env.IDLE_CONNECTION_TIMEOUT_MS ?? DEFAULT_IDLE_CONNECTION_TIMEOUT_MS
+  );
+  const roomIdleTimeoutMs = Number(options.roomIdleTimeoutMs ?? process.env.ROOM_IDLE_TIMEOUT_MS ?? DEFAULT_ROOM_IDLE_TIMEOUT_MS);
+  const cleanupIntervalMs = Number(options.cleanupIntervalMs ?? DEFAULT_CLEANUP_INTERVAL_MS);
 
   async function authenticateRequest(req, required = true) {
     const authorization = String(req.headers.authorization || "");
@@ -298,6 +308,26 @@ function createOutmazeServer(options = {}) {
   }, 30000);
   heartbeatTimer.unref?.();
 
+  const cleanupTimer = setInterval(() => {
+    const timestamp = now();
+    rooms.forEach((room) => {
+      if (timestamp - Number(room.lastActivityAt || timestamp) < roomIdleTimeoutMs) return;
+      clearRoomTimer(room);
+      rooms.delete(room.code);
+      room.players.forEach((player) => {
+        send(player.ws, { type: "room-expired", room: room.code, reason: "idle-timeout" });
+        player.ws.close(4000, "idle-timeout");
+      });
+    });
+    wss.clients.forEach((client) => {
+      if (!client.outmazeAuthenticated || client.outmazeRoom) return;
+      if (timestamp - Number(client.outmazeLastActivityAt || timestamp) >= idleConnectionTimeoutMs) {
+        client.close(4000, "idle-timeout");
+      }
+    });
+  }, Math.max(10, cleanupIntervalMs));
+  cleanupTimer.unref?.();
+
   function send(ws, message) {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
   }
@@ -351,6 +381,10 @@ function createOutmazeServer(options = {}) {
 
   function broadcastRoomState(room) {
     broadcast(room, roomState(room));
+  }
+
+  function touchRoom(room) {
+    if (room) room.lastActivityAt = now();
   }
 
   function makeRoomCode() {
@@ -415,6 +449,7 @@ function createOutmazeServer(options = {}) {
 
   function startRound(room, reuseMaze = false) {
     if (room.players.length !== 2) return;
+    touchRoom(room);
     resetRoundState(room);
     room.phase = "building";
     room.roundId += 1;
@@ -449,6 +484,7 @@ function createOutmazeServer(options = {}) {
 
   function startPartyRound(room, resetMatch = false) {
     if (room.mode !== "party" || room.players.length < 2) return;
+    touchRoom(room);
     resetRoundState(room);
     if (resetMatch) {
       room.roundNumber = 0;
@@ -527,6 +563,8 @@ function createOutmazeServer(options = {}) {
     const playerIndex = room.players.findIndex((player) => player.ws === ws);
     if (playerIndex < 0) return;
     const [departed] = room.players.splice(playerIndex, 1);
+    ws.outmazeRoom = null;
+    ws.outmazeLastActivityAt = now();
     room.ready.delete(ws);
     room.earlyVotes.delete(ws);
     room.submissions.delete(ws);
@@ -538,6 +576,7 @@ function createOutmazeServer(options = {}) {
         rooms.delete(room.code);
         return;
       }
+      touchRoom(room);
       room.players.forEach((player, index) => {
         player.slot = index + 1;
       });
@@ -561,6 +600,7 @@ function createOutmazeServer(options = {}) {
       rooms.delete(room.code);
       return;
     }
+    touchRoom(room);
     if (notify) broadcast(room, { type: "peer-left" });
     broadcastRoomState(room);
   }
@@ -570,6 +610,13 @@ function createOutmazeServer(options = {}) {
     let identity = null;
     let profile = null;
     ws.isAlive = true;
+    ws.outmazeAuthenticated = false;
+    ws.outmazeRoom = null;
+    ws.outmazeLastActivityAt = now();
+    const authTimer = setTimeout(() => {
+      if (!ws.outmazeAuthenticated && ws.readyState === WebSocket.OPEN) ws.close(4401, "authentication-timeout");
+    }, Math.max(1, authTimeoutMs));
+    authTimer.unref?.();
     ws.on("pong", () => {
       ws.isAlive = true;
     });
@@ -579,6 +626,8 @@ function createOutmazeServer(options = {}) {
       const room = rooms.get(currentRoom);
       if (room) detachPlayer(room, ws, notify);
       currentRoom = null;
+      ws.outmazeRoom = null;
+      ws.outmazeLastActivityAt = now();
     }
 
     async function ensureOnlineProfile() {
@@ -586,6 +635,8 @@ function createOutmazeServer(options = {}) {
         const id = `anonymous-${++anonymousCounter}`;
         identity = { uid: id };
         profile = { uid: id, name: `Player ${anonymousCounter}`, emoji: "👤" };
+        ws.outmazeAuthenticated = true;
+        clearTimeout(authTimer);
       }
       if (!identity) throw Object.assign(new Error("Sign in to continue"), { code: "sign-in-required", status: 401 });
       if (!profile) throw Object.assign(new Error("Create your Outmaze profile first"), { code: "profile-required", status: 403 });
@@ -609,7 +660,8 @@ function createOutmazeServer(options = {}) {
         roundId: 0,
         seed: "",
         locked: false,
-        lockTimer: null
+        lockTimer: null,
+        lastActivityAt: now()
       };
     }
 
@@ -627,6 +679,9 @@ function createOutmazeServer(options = {}) {
         if (type === "auth") {
           if (currentRoom) throw Object.assign(new Error("Leave the current room before changing account"), { code: "room-active" });
           identity = await authService.verify(message.token);
+          ws.outmazeAuthenticated = true;
+          ws.outmazeLastActivityAt = now();
+          clearTimeout(authTimer);
           profile = await store.getProfile(identity.uid);
           if (!profile) {
             send(ws, { type: "profile-required" });
@@ -649,6 +704,8 @@ function createOutmazeServer(options = {}) {
           const room = makeBaseRoom(code, "friend");
           rooms.set(code, room);
           currentRoom = code;
+          ws.outmazeRoom = code;
+          ws.outmazeLastActivityAt = now();
           send(ws, { type: "created", room: code, slot: 1, profile: publicProfile(profile) });
           broadcastRoomState(room);
           return;
@@ -675,7 +732,10 @@ function createOutmazeServer(options = {}) {
           }
           leaveCurrentRoom();
           room.players.push(makePlayer(2));
+          touchRoom(room);
           currentRoom = code;
+          ws.outmazeRoom = code;
+          ws.outmazeLastActivityAt = now();
           send(ws, { type: "joined", room: code, slot: 2, profile: publicProfile(profile) });
           room.players.forEach((candidate) => {
             if (candidate.ws !== ws) send(candidate.ws, { type: "peer-joined", profile: publicProfile(profile) });
@@ -692,6 +752,8 @@ function createOutmazeServer(options = {}) {
           room.roundNumber = 0;
           rooms.set(code, room);
           currentRoom = code;
+          ws.outmazeRoom = code;
+          ws.outmazeLastActivityAt = now();
           send(ws, { type: "party-created", room: code, profile: publicProfile(profile) });
           broadcastRoomState(room);
           return;
@@ -718,7 +780,10 @@ function createOutmazeServer(options = {}) {
           }
           leaveCurrentRoom();
           room.players.push(makePlayer(room.players.length + 1));
+          touchRoom(room);
           currentRoom = code;
+          ws.outmazeRoom = code;
+          ws.outmazeLastActivityAt = now();
           send(ws, { type: "party-joined", room: code, profile: publicProfile(profile) });
           broadcast(room, { type: "party-player-joined", profile: publicProfile(profile) });
           broadcastRoomState(room);
@@ -731,6 +796,8 @@ function createOutmazeServer(options = {}) {
           send(ws, { type: "error", code: "not-in-room", error: "Create or join a room first" });
           return;
         }
+        touchRoom(room);
+        ws.outmazeLastActivityAt = now();
 
         if (room.mode === "party") {
           if (type === "party-settings") {
@@ -854,7 +921,10 @@ function createOutmazeServer(options = {}) {
       }
     });
 
-    ws.on("close", () => leaveCurrentRoom());
+    ws.on("close", () => {
+      clearTimeout(authTimer);
+      leaveCurrentRoom();
+    });
   });
 
   function listen() {
@@ -875,6 +945,7 @@ function createOutmazeServer(options = {}) {
 
   function close() {
     clearInterval(heartbeatTimer);
+    clearInterval(cleanupTimer);
     rooms.forEach(clearRoomTimer);
     rooms.clear();
     wss.clients.forEach((client) => client.terminate());

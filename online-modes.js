@@ -433,7 +433,14 @@
       return;
     }
     if (event.type === "disconnected") {
-      setPartyStatus("Disconnected from the party server. Return to the menu and reopen Party Mode.", true);
+      setPartyStatus(
+        event.reason === "idle-timeout"
+          ? "This party closed after 10 minutes without activity. Return to the menu to create or join another."
+          : event.reason === "authentication-timeout"
+            ? "The connection closed because sign-in did not finish in time. Return to the menu and try again."
+            : "Disconnected from the party server. Return to the menu and reopen Party Mode.",
+        true
+      );
       return;
     }
     if (event.type === "profile-required") {

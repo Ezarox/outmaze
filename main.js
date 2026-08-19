@@ -1175,7 +1175,13 @@ function handleVsEvent(evt) {
     state.vs.connected = false;
     state.vs.phase = "disconnected";
     stopVsCountdown();
-    updateVsStatus("Disconnected from the Outmaze server. Leave and reopen multiplayer to reconnect.");
+    updateVsStatus(
+      evt.reason === "idle-timeout"
+        ? "This room closed after 10 minutes without activity. Return to the menu to create or join another."
+        : evt.reason === "authentication-timeout"
+          ? "The connection closed because sign-in did not finish in time. Return to the menu and try again."
+          : "Disconnected from the Outmaze server. Leave and reopen multiplayer to reconnect."
+    );
     resetVsEarlyStartVotes();
     updateVsPanelState();
     return;
@@ -2394,10 +2400,10 @@ function vsConnect(onEvent = null) {
       ws.close();
     }
   };
-  ws.onclose = () => {
+  ws.onclose = (event) => {
     if (versusClient.ws === ws) versusClient.ws = null;
     versusClient.authenticated = false;
-    emitVsEvent({ type: "disconnected" });
+    emitVsEvent({ type: "disconnected", code: event.code, reason: event.reason || "" });
   };
   ws.onerror = () => emitVsEvent({ type: "error", error: "Could not connect to the multiplayer server" });
   ws.onmessage = (evt) => {

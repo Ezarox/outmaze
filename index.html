@@ -41,7 +41,7 @@
           Daily challenge
         </button>
       </div>
-      <p id="multiplayerNote" class="menu-footnote">Online modes use your name and emoji across rooms and leaderboards.</p>
+      <p id="multiplayerNote" class="menu-footnote">Online modes remember your name and emoji in this browser.</p>
     </div>
   </div>
 
@@ -55,12 +55,12 @@
   <div id="profileOverlay" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="profileTitle">
     <div class="profile-card">
       <button id="closeProfile" class="icon-button modal-close" type="button" aria-label="Close profile">&#215;</button>
-      <p class="eyebrow">One identity everywhere</p>
+      <p class="eyebrow">Your player identity</p>
       <h2 id="profileTitle">Your Outmaze profile</h2>
-      <p class="profile-lead">Your Google account keeps one name and emoji attached to friend rooms, parties, and Daily scores.</p>
+      <p id="profileLead" class="profile-lead">This browser keeps one name and emoji attached to friend rooms, parties, and Daily scores.</p>
       <div id="profileSignedOut" class="profile-auth-view">
-        <button id="profileGoogleSignIn" class="button button--primary button--large" type="button">Continue with Google</button>
-        <button id="profileDevSignIn" class="button button--quiet hidden" type="button">Create local test profile</button>
+        <button id="profileAnonymousSignIn" class="button button--primary button--large hidden" type="button">Retry profile setup</button>
+        <button id="profileDevSignIn" class="button button--primary button--large hidden" type="button">Continue with a local test profile</button>
         <p id="profileAuthStatus" class="profile-status" role="status" aria-live="polite"></p>
       </div>
       <form id="profileForm" class="profile-form hidden">
@@ -76,7 +76,7 @@
         <p id="profileSaveStatus" class="profile-status" role="status" aria-live="polite"></p>
         <div class="profile-actions">
           <button class="button button--primary" type="submit">Save profile</button>
-          <button id="profileSignOut" class="button button--quiet" type="button">Sign out</button>
+          <button id="profileSignOut" class="button button--quiet hidden" type="button">Leave local profile</button>
         </div>
       </form>
     </div>

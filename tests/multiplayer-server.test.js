@@ -14,6 +14,9 @@ function createClient(url, options = {}) {
   const ws = new WebSocket(url, options);
   const inbox = [];
   const waiters = [];
+  const closed = new Promise((resolve) => {
+    ws.once("close", (code, reason) => resolve({ code, reason: reason.toString() }));
+  });
 
   ws.on("message", (data) => {
     const message = JSON.parse(data.toString());
@@ -47,6 +50,7 @@ function createClient(url, options = {}) {
       ws.once("open", resolve);
       ws.once("error", reject);
     }),
+    closed,
     next,
     send(message) {
       ws.send(JSON.stringify(message));
@@ -103,6 +107,57 @@ test("public backend redirects visitors and only accepts configured browser orig
 
   assert.equal(await rejectedConnectionStatus(wsUrl, { origin: "https://example.com" }), 401);
   assert.equal(await rejectedConnectionStatus(wsUrl), 401);
+});
+
+test("server closes connections that do not authenticate promptly", async (t) => {
+  const app = createOutmazeServer({ port: 0, requireProfiles: true, authTimeoutMs: 25 });
+  const address = await app.listen();
+  const client = createClient(`ws://127.0.0.1:${address.port}`);
+  t.after(() => app.close());
+  await client.opened;
+  const closed = await client.closed;
+  assert.equal(closed.code, 4401);
+  assert.equal(closed.reason, "authentication-timeout");
+});
+
+test("authenticated players have time to create a missing profile", async (t) => {
+  const app = createOutmazeServer({
+    port: 0,
+    requireProfiles: true,
+    authTimeoutMs: 25,
+    authService: { verify: async () => ({ uid: "new-player" }) },
+    store: createMemoryStore()
+  });
+  const address = await app.listen();
+  const client = createClient(`ws://127.0.0.1:${address.port}`);
+  t.after(() => app.close());
+  t.after(() => client.close());
+  await client.opened;
+  client.send({ type: "auth", token: "valid-token" });
+  await client.next((message) => message.type === "profile-required");
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(client.ws.readyState, WebSocket.OPEN);
+});
+
+test("server expires abandoned rooms and closes their active sockets", async (t) => {
+  const app = createOutmazeServer({
+    port: 0,
+    roomIdleTimeoutMs: 30,
+    cleanupIntervalMs: 10
+  });
+  const address = await app.listen();
+  const client = createClient(`ws://127.0.0.1:${address.port}`);
+  t.after(() => app.close());
+  await client.opened;
+  client.send({ type: "create" });
+  const created = await client.next((message) => message.type === "created");
+  assert.equal(app.rooms.has(created.room), true);
+  const expired = await client.next((message) => message.type === "room-expired");
+  assert.equal(expired.reason, "idle-timeout");
+  const closed = await client.closed;
+  assert.equal(closed.code, 4000);
+  assert.equal(closed.reason, "idle-timeout");
+  assert.equal(app.rooms.has(created.room), false);
 });
 
 test("server synchronizes a private two-player build before revealing either maze", async (t) => {

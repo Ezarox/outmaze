@@ -11,7 +11,7 @@ npm install
 npm start
 ```
 
-Open [http://localhost:8080](http://localhost:8080). Single-player, friend rooms, Party Mode, and the Daily Challenge use the same local server. Local profiles do not contact Google. To test several identities alone, open URLs such as `http://localhost:8080/?devPlayer=fox` and `http://localhost:8080/?devPlayer=frog` in separate tabs.
+Open [http://localhost:8080](http://localhost:8080). Single-player, friend rooms, Party Mode, and the Daily Challenge use the same local server. Local profiles use separate test identities and do not contact Firebase. To test several identities alone, open URLs such as `http://localhost:8080/?devPlayer=fox` and `http://localhost:8080/?devPlayer=frog` in separate tabs.
 
 Another device on the same network can join through the host computer's local network address, provided port 8080 is reachable through the host firewall. Both players must load Outmaze from the same running server.
 
@@ -25,7 +25,7 @@ GitHub Pages deploys the `main` branch from the repository root. The `.nojekyll`
 
 Friend rooms and Party Mode use the lightweight WebSocket server on Google Cloud Run. The browser connects only after a player opens an online mode. Cloud Run validates the GitHub Pages origin, holds temporary room state in memory, and redirects ordinary HTTP visitors back to the GitHub Pages site.
 
-Google sign-in gives every online player one persistent Outmaze name and emoji. Profiles and server-verified Daily best times are stored in Cloud Firestore; the Daily AI maze remains on the server and only its benchmark time is returned. The browser Firebase configuration in `firebase-config.js` contains public app identifiers, not billing credentials or server secrets.
+Firebase anonymously creates a secure identity that persists in the player's browser, so each player chooses an Outmaze name and emoji only once on that browser. Profiles and server-verified Daily best times are stored in Cloud Firestore; the Daily AI maze remains on the server and only its benchmark time is returned. The browser Firebase configuration in `firebase-config.js` contains public app identifiers, not billing credentials or server secrets.
 
 After installing and signing into the Google Cloud CLI, deploy with:
 
@@ -39,12 +39,12 @@ One-time Firebase setup is required for a new Google Cloud project:
 
 1. Add Firebase to the existing project and accept the Firebase Terms in the Firebase console.
 2. Register an Outmaze web app and copy its public configuration into `firebase-config.js`.
-3. In Authentication, enable Google as a provider and add `ezarox.github.io` to Authorized domains.
+3. In Authentication, enable Anonymous as a provider. Leave automatic clean-up disabled so inactive browser profiles remain recoverable.
 4. Create the default Firestore database in `australia-southeast1` and grant the Cloud Run service account `roles/datastore.user`.
 
-The Outmaze project already uses a locked-down server architecture: browsers never access Firestore directly, and the Admin SDK validates each signed-in user and submitted maze on Cloud Run.
+The Outmaze project already uses a locked-down server architecture: browsers never access Firestore directly, and the Admin SDK validates each anonymous Firebase identity and submitted maze on Cloud Run.
 
-The Google Cloud project must have an active billing account even when its usage remains within Cloud Run's free allowance. Configure a budget alert in Google Cloud before public promotion.
+The Google Cloud project must have an active billing account even when its usage remains within Cloud Run's free allowance. Configure a Cloud Run spend cap in Google Cloud before public promotion.
 
 ## Tests
 

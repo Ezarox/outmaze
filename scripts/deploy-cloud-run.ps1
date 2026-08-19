@@ -32,7 +32,8 @@ gcloud run deploy $Service `
   --max-instances 1 `
   --memory 1Gi `
   --cpu 1 `
-  --set-env-vars "NODE_ENV=production,ALLOWED_ORIGINS=https://ezarox.github.io,PUBLIC_SITE_URL=https://ezarox.github.io/outmaze/,FIRESTORE_ENABLED=true,REQUIRE_PROFILES=true,OUTMAZE_PROJECT_ID=$ProjectId" `
+  --cpu-throttling `
+  --set-env-vars "NODE_ENV=production,ALLOWED_ORIGINS=https://ezarox.github.io,PUBLIC_SITE_URL=https://ezarox.github.io/outmaze/,FIRESTORE_ENABLED=true,REQUIRE_PROFILES=true,OUTMAZE_PROJECT_ID=$ProjectId,AUTH_TIMEOUT_MS=10000,IDLE_CONNECTION_TIMEOUT_MS=300000,ROOM_IDLE_TIMEOUT_MS=600000" `
   --quiet
 
 gcloud run services describe $Service `
