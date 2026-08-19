@@ -894,6 +894,10 @@ body.vs-mode #editRetry {
   display: none !important;
 }
 
+body.vs-mode #gameHud {
+  display: none !important;
+}
+
 body.vs-mode .start-control {
   display: none;
 }
@@ -928,7 +932,15 @@ body.vs-mode .resource-toolbar {
   font-size: 1rem;
 }
 
-.vs-room-badge {
+.vs-session-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.42rem;
+}
+
+.vs-room-badge,
+.vs-seed-badge {
   border: 1px solid rgba(120, 247, 187, 0.3);
   border-radius: 999px;
   padding: 0.42rem 0.68rem;
@@ -938,11 +950,26 @@ body.vs-mode .resource-toolbar {
   font-size: 0.68rem;
 }
 
-.vs-room-badge strong {
+.vs-room-badge strong,
+.vs-seed-badge strong {
   margin-left: 0.25rem;
   color: var(--mint);
   font: 800 0.78rem ui-monospace, SFMono-Regular, Menlo, monospace;
   letter-spacing: 0.12em;
+}
+
+.vs-seed-badge {
+  display: inline-flex;
+  align-items: center;
+  cursor: text;
+}
+
+.vs-seed-badge strong {
+  max-width: 135px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: all;
+  white-space: nowrap;
 }
 
 .vs-lobby-actions,

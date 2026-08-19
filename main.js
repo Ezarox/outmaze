@@ -721,6 +721,8 @@ const vsDivider = vsPanel?.querySelector(".vs-divider");
 const vsReadyBtn = document.getElementById("vsReadyBtn");
 const vsCopyRoomBtn = document.getElementById("vsCopyRoom");
 const vsRoomCodeEl = document.getElementById("vsRoomCode");
+const vsSeedBadge = document.getElementById("vsSeedBadge");
+const vsSeedCode = document.getElementById("vsSeedCode");
 const vsLobbyActions = document.getElementById("vsLobbyActions");
 const vsMatchActions = document.getElementById("vsMatchActions");
 const vsRematchActions = document.getElementById("vsRematchActions");
@@ -728,6 +730,8 @@ const vsLeaveBtn = document.getElementById("vsLeave");
 const vsStatusEl = document.getElementById("vsStatus");
 const vsTryAgainBtn = document.getElementById("vsTryAgain");
 const vsNewGameBtn = document.getElementById("vsNewGame");
+const vsTryAgainDetail = document.getElementById("vsTryAgainDetail");
+const vsNewGameDetail = document.getElementById("vsNewGameDetail");
 const vsChoiceStatus = document.getElementById("vsChoiceStatus");
 const vsEarlyStartBtn = document.getElementById("vsEarlyStartBtn");
 const vsPlayerStates = document.getElementById("vsPlayerStates");
@@ -1271,7 +1275,9 @@ function updateVsPanelState() {
   const inRoom = Boolean(state.vs.room);
   const lobby = inRoom && state.vs.phase === "lobby";
   const building = inRoom && state.vs.phase === "building";
-  const showRematch = inRoom && state.vs.phase === "racing" && Boolean(state.race?.finished);
+  const racing = inRoom && state.vs.phase === "racing";
+  const raceComplete = racing && Boolean(state.race?.finished);
+  const showRematch = racing;
   vsPanel?.classList.toggle("hidden", !state.vs.active);
   if (state.vs.active) {
     resourceToolbar?.classList.toggle("hidden", !building || state.vs.mazeSubmitted);
@@ -1280,6 +1286,12 @@ function updateVsPanelState() {
   vsCopyRoomBtn?.classList.toggle("hidden", !inRoom);
   vsLeaveBtn?.classList.toggle("hidden", !inRoom);
   if (vsRoomCodeEl) vsRoomCodeEl.textContent = state.vs.room || "-----";
+  const showSeed = inRoom && Boolean(state.seed);
+  vsSeedBadge?.classList.toggle("hidden", !showSeed);
+  if (vsSeedCode) {
+    vsSeedCode.textContent = state.seed || "--";
+    vsSeedCode.title = state.seed || "";
+  }
   vsLobbyActions?.classList.toggle("hidden", inRoom && !lobby);
   vsCreateBtn?.classList.toggle("hidden", inRoom);
   vsJoinBtn?.classList.toggle("hidden", inRoom);
@@ -1294,6 +1306,10 @@ function updateVsPanelState() {
   }
   vsMatchActions?.classList.toggle("hidden", !building || state.vs.mazeSubmitted);
   vsRematchActions?.classList.toggle("hidden", !showRematch);
+  vsRematchActions?.setAttribute(
+    "aria-label",
+    raceComplete ? "Choose the next round" : "Stop the current race and choose what comes next"
+  );
 
   if (vsPanelTitle) {
     if (!state.vs.connected) vsPanelTitle.textContent = "Connecting to multiplayer";
@@ -1302,7 +1318,8 @@ function updateVsPanelState() {
     else if (lobby) vsPanelTitle.textContent = "Both players are here";
     else if (building && state.vs.mazeSubmitted) vsPanelTitle.textContent = "Maze locked";
     else if (building) vsPanelTitle.textContent = "Build in private";
-    else if (showRematch) vsPanelTitle.textContent = "Choose the next round";
+    else if (raceComplete) vsPanelTitle.textContent = "Choose the next round";
+    else if (racing) vsPanelTitle.textContent = "Race in progress";
     else vsPanelTitle.textContent = "Opponent maze revealed";
   }
   updateEarlyStartControls();
@@ -2066,13 +2083,24 @@ function setVsChoice(choice) {
 
 function updateVsChoiceStatus() {
   if (!vsChoiceStatus) return;
+  const raceInProgress = state.vs.phase === "racing" && !state.race?.finished;
   const mismatch = state.vs.choiceSelf && state.vs.choicePeer && state.vs.choiceSelf !== state.vs.choicePeer;
   const matched = state.vs.choiceSelf && state.vs.choiceSelf === state.vs.choicePeer;
-  if (!state.vs.choiceSelf) vsChoiceStatus.textContent = "Choose how you want the room to continue.";
-  else if (!state.vs.choicePeer) vsChoiceStatus.textContent = "Choice saved. Waiting for your opponent…";
+  if (!state.vs.choiceSelf) {
+    vsChoiceStatus.textContent = raceInProgress
+      ? "Both players must agree to stop the current race."
+      : "Choose how you want the room to continue.";
+  } else if (!state.vs.choicePeer) {
+    vsChoiceStatus.textContent = raceInProgress
+      ? "Stop request saved. The race continues while you wait…"
+      : "Choice saved. Waiting for your opponent…";
+  }
   else if (mismatch) vsChoiceStatus.textContent = "Choose the same option to continue together.";
   else if (matched) vsChoiceStatus.textContent = "Choices match. Preparing the next round…";
   else vsChoiceStatus.textContent = "";
+
+  if (vsTryAgainDetail) vsTryAgainDetail.textContent = raceInProgress ? "Stop race & edit" : "Keep this seed";
+  if (vsNewGameDetail) vsNewGameDetail.textContent = raceInProgress ? "Stop race & reset" : "Fresh environment";
 
   const updateChoiceButton = (button, selected) => {
     if (!button) return;
@@ -2098,8 +2126,8 @@ function updateVsPlayerStates() {
   const inRoom = Boolean(state.vs.room);
   const lobby = inRoom && state.vs.phase === "lobby";
   const building = inRoom && state.vs.phase === "building" && !state.vs.mazeSubmitted;
-  const rematch = inRoom && state.vs.phase === "racing" && Boolean(state.race?.finished);
-  const visible = lobby || building || rematch;
+  const racing = inRoom && state.vs.phase === "racing";
+  const visible = lobby || building || racing;
   vsPlayerStates.classList.toggle("hidden", !visible);
   if (!visible) return;
 
@@ -2121,14 +2149,16 @@ function updateVsPlayerStates() {
     peerText = state.vs.earlyStartPeer ? "Ready to start" : "Building";
     selfVisual = state.vs.earlyStartSelf ? "ready" : "active";
     peerVisual = state.vs.earlyStartPeer ? "ready" : "active";
-  } else if (rematch) {
-    const choiceLabel = (choice) => (choice === "same" ? "Modify maze" : choice === "new" ? "New seed" : "Choosing…");
+  } else if (racing) {
+    const raceComplete = Boolean(state.race?.finished);
+    const choiceLabel = (choice) =>
+      choice === "same" ? "Modify maze" : choice === "new" ? "New seed" : raceComplete ? "Choosing…" : "Runner active";
     const mismatch = state.vs.choiceSelf && state.vs.choicePeer && state.vs.choiceSelf !== state.vs.choicePeer;
     const matched = state.vs.choiceSelf && state.vs.choiceSelf === state.vs.choicePeer;
     selfText = choiceLabel(state.vs.choiceSelf);
     peerText = choiceLabel(state.vs.choicePeer);
-    selfVisual = mismatch ? "warning" : matched ? "ready" : state.vs.choiceSelf ? "selected" : "waiting";
-    peerVisual = mismatch ? "warning" : matched ? "ready" : state.vs.choicePeer ? "selected" : "waiting";
+    selfVisual = mismatch ? "warning" : matched ? "ready" : state.vs.choiceSelf ? "selected" : raceComplete ? "waiting" : "active";
+    peerVisual = mismatch ? "warning" : matched ? "ready" : state.vs.choicePeer ? "selected" : raceComplete ? "waiting" : "active";
   }
 
   setVsPlayerState(vsSelfState, vsSelfStateLabel, vsSelfStateText, "You", selfText, selfVisual);

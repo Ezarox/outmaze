@@ -112,9 +112,14 @@
           <p class="info-kicker">Two-player race</p>
           <h3 id="vsPanelTitle">Create or join a private room</h3>
         </div>
-        <button id="vsCopyRoom" class="vs-room-badge hidden" type="button" title="Copy room code">
-          Room <strong id="vsRoomCode">-----</strong>
-        </button>
+        <div class="vs-session-badges">
+          <button id="vsCopyRoom" class="vs-room-badge hidden" type="button" title="Copy room code">
+            Room <strong id="vsRoomCode">-----</strong>
+          </button>
+          <span id="vsSeedBadge" class="vs-seed-badge hidden" aria-label="Current seed">
+            Seed <strong id="vsSeedCode">--</strong>
+          </span>
+        </div>
       </div>
       <p id="vsStatus" class="vs-status" role="status" aria-live="polite">Connecting to the Outmaze server…</p>
       <div id="vsLobbyActions" class="vs-lobby-actions">
@@ -133,11 +138,11 @@
       <div id="vsRematchActions" class="vs-rematch hidden" aria-label="Choose the next round">
         <button id="vsTryAgain" class="button button--quiet vs-choice-button" type="button" aria-pressed="false">
           <span class="vs-choice-icon" aria-hidden="true">↺</span>
-          <span><strong>Modify maze</strong><small>Keep this seed</small></span>
+          <span><strong>Modify maze</strong><small id="vsTryAgainDetail">Keep this seed</small></span>
         </button>
         <button id="vsNewGame" class="button button--quiet vs-choice-button" type="button" aria-pressed="false">
           <span class="vs-choice-icon" aria-hidden="true">✦</span>
-          <span><strong>New seed</strong><small>Fresh environment</small></span>
+          <span><strong>New seed</strong><small id="vsNewGameDetail">Fresh environment</small></span>
         </button>
         <p id="vsChoiceStatus" class="vs-choice-hint" role="status" aria-live="polite"></p>
       </div>
