@@ -494,7 +494,12 @@
 
   function partyAnimationFrame(timestamp) {
     if (!partyAnimation || partyAnimation.complete) return;
-    const delta = Math.min(0.05, Math.max(0, (timestamp - partyAnimation.last) / 1000));
+    const frameDelta = Math.max(0, (timestamp - partyAnimation.last) / 1000);
+    // Do not discard normal slow frames: doing so made the same deterministic
+    // party race visibly last longer on lower-powered devices. Only ignore a
+    // genuine app/browser suspension so returning to the tab does not skip the
+    // entire reveal.
+    const delta = frameDelta > 5 ? 0 : frameDelta;
     partyAnimation.last = timestamp;
     partyAnimation.accumulator += delta;
     while (partyAnimation.accumulator >= AICore.constants.FIXED_TIMESTEP) {

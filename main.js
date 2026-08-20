@@ -18,7 +18,11 @@ const NPC_RADIUS = 0.35;
 const PAD_PULSE_PERIOD = 3.5;
 const ENTRANCE_X = Math.floor(GRID_SIZE / 2);
 const FIXED_TIMESTEP = 1 / 120;
-const MAX_FRAME_DELTA = 0.1;
+// Preserve real elapsed time through ordinary slow frames so the visible race
+// duration matches its deterministic result on both fast and busy devices.
+// A gap this large indicates that the browser/app was suspended, so it should
+// not make the race jump forward when the player returns.
+const SUSPENDED_FRAME_DELTA = 5;
 
 const CELL_EMPTY = 0;
 const CELL_STATIC = 1;
@@ -4722,7 +4726,7 @@ function drawCatalogueBlockIcon(ctx, outer, inner) {
 function loop(timestamp) {
   let delta = (timestamp - lastFrame) / 1000;
   lastFrame = timestamp;
-  if (delta > MAX_FRAME_DELTA) delta = MAX_FRAME_DELTA;
+  if (delta > SUSPENDED_FRAME_DELTA) delta = 0;
 
   if (state.mode === "menu" || state.paused) {
     accumulator = 0;
