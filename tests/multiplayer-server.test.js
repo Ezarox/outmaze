@@ -460,7 +460,7 @@ test("profile and daily HTTP APIs require identity and retain the best verified 
   const saved = await fetch(`${base}/api/profile`, {
     method: "POST",
     headers: { Authorization: "Bearer profile-user", "Content-Type": "application/json" },
-    body: JSON.stringify({ name: "Profile Fox", emoji: "🦊" })
+    body: JSON.stringify({ name: "Profile Fox", emoji: "🦊", recoveryPin: "246810" })
   });
   assert.equal(saved.status, 200);
   assert.equal((await saved.json()).profile.name, "Profile Fox");
@@ -474,4 +474,37 @@ test("profile and daily HTTP APIs require identity and retain the best verified 
     body: "{}"
   });
   assert.equal((await submitted.json()).rank, 1);
+});
+
+test("profile HTTP API recovers an identity with its private PIN", async (t) => {
+  const store = createMemoryStore();
+  const authService = { async verify(token) { return { uid: String(token) }; } };
+  const app = createOutmazeServer({ port: 0, store, authService });
+  const address = await app.listen();
+  const base = `http://127.0.0.1:${address.port}`;
+  t.after(() => app.close());
+
+  const created = await fetch(`${base}/api/profile`, {
+    method: "POST",
+    headers: { Authorization: "Bearer old-browser", "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "Recoverable Fox", emoji: "🦊", recoveryPin: "135790" })
+  });
+  assert.equal(created.status, 200);
+  assert.equal((await created.json()).profile.recoveryReady, true);
+
+  const rejected = await fetch(`${base}/api/profile/recover`, {
+    method: "POST",
+    headers: { Authorization: "Bearer new-browser", "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "Recoverable Fox", emoji: "🦊", recoveryPin: "000000" })
+  });
+  assert.equal(rejected.status, 403);
+
+  const recovered = await fetch(`${base}/api/profile/recover`, {
+    method: "POST",
+    headers: { Authorization: "Bearer new-browser", "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "Recoverable Fox", emoji: "🦊", recoveryPin: "135790" })
+  });
+  assert.equal(recovered.status, 200);
+  assert.equal((await recovered.json()).profile.uid, "new-browser");
+  assert.equal(await store.getProfile("old-browser"), null);
 });

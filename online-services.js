@@ -1,5 +1,6 @@
 "use strict";
 
+const crypto = require("node:crypto");
 require("./ai-core.js");
 
 const AICore = globalThis.AICore;
@@ -40,6 +41,29 @@ function normalizeEmoji(value) {
     throw createServiceError("invalid-emoji", "Choose one of the available profile emojis");
   }
   return emoji;
+}
+
+function normalizeRecoveryPin(value) {
+  const pin = String(value || "").trim();
+  if (!/^\d{6}$/.test(pin)) {
+    throw createServiceError("invalid-recovery-pin", "Choose a 6-digit recovery PIN");
+  }
+  return pin;
+}
+
+function createRecoveryVerifier(value) {
+  const pin = normalizeRecoveryPin(value);
+  const recoverySalt = crypto.randomBytes(16).toString("base64url");
+  const recoveryHash = crypto.scryptSync(pin, recoverySalt, 32).toString("base64url");
+  return { recoverySalt, recoveryHash };
+}
+
+function recoveryPinMatches(profile, value) {
+  if (!profile?.recoverySalt || !profile?.recoveryHash) return false;
+  const pin = normalizeRecoveryPin(value);
+  const expected = Buffer.from(profile.recoveryHash, "base64url");
+  const actual = crypto.scryptSync(pin, profile.recoverySalt, expected.length);
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
 }
 
 function publicProfile(profile) {
@@ -92,10 +116,59 @@ function createMemoryStore(options = {}) {
         name,
         nameKey: key,
         emoji,
+        ...(value.recoveryPin ? createRecoveryVerifier(value.recoveryPin) : {
+          recoverySalt: previous?.recoverySalt,
+          recoveryHash: previous?.recoveryHash
+        }),
         createdAt: previous?.createdAt || Date.now(),
         updatedAt: Date.now()
       };
       profiles.set(uid, profile);
+      await persist();
+      return profile;
+    },
+    async recoverProfile(uid, value) {
+      const name = normalizeDisplayName(value.name);
+      const emoji = normalizeEmoji(value.emoji);
+      const pin = normalizeRecoveryPin(value.recoveryPin);
+      const key = profileNameKey(name);
+      const previousUid = names.get(key);
+      if (!previousUid) throw createServiceError("profile-not-found", "No profile uses that name", 404);
+      const previous = profiles.get(previousUid);
+      const legacyMatch = !previous?.recoveryHash && previous?.emoji === emoji;
+      if (!legacyMatch && !recoveryPinMatches(previous, pin)) {
+        throw createServiceError("invalid-recovery-pin", "That recovery PIN is incorrect", 403);
+      }
+      const current = profiles.get(uid);
+      if (current?.nameKey && current.nameKey !== key) names.delete(current.nameKey);
+      const verifier = createRecoveryVerifier(pin);
+      const profile = {
+        ...previous,
+        ...verifier,
+        uid,
+        name,
+        nameKey: key,
+        emoji,
+        updatedAt: Date.now()
+      };
+      profiles.delete(previousUid);
+      profiles.set(uid, profile);
+      names.set(key, uid);
+      if (previousUid !== uid) {
+        dailyScores.forEach((scores) => {
+          const oldScore = scores.get(previousUid);
+          if (!oldScore) return;
+          const currentScore = scores.get(uid);
+          scores.set(uid, {
+            ...oldScore,
+            uid,
+            bestMs: Math.max(Number(oldScore.bestMs || 0), Number(currentScore?.bestMs || 0)),
+            attempts: Number(oldScore.attempts || 0) + Number(currentScore?.attempts || 0),
+            updatedAt: Math.max(Number(oldScore.updatedAt || 0), Number(currentScore?.updatedAt || 0))
+          });
+          scores.delete(previousUid);
+        });
+      }
       await persist();
       return profile;
     },
@@ -181,6 +254,7 @@ function createFirestoreStore(options = {}) {
       const name = normalizeDisplayName(value.name);
       const emoji = normalizeEmoji(value.emoji);
       const nameKey = profileNameKey(name);
+      const recovery = value.recoveryPin ? createRecoveryVerifier(value.recoveryPin) : null;
       const profileRef = db.collection("profiles").doc(uid);
       const nameRef = db.collection("profileNames").doc(encodeURIComponent(nameKey));
       await db.runTransaction(async (transaction) => {
@@ -202,13 +276,85 @@ function createFirestoreStore(options = {}) {
             name,
             nameKey,
             emoji,
+            ...(recovery || {}),
             createdAt: previous?.createdAt || FieldValue.serverTimestamp(),
             updatedAt: FieldValue.serverTimestamp()
           },
           { merge: true }
         );
       });
-      return { uid, name, nameKey, emoji };
+      const saved = await profileRef.get();
+      return { uid, ...saved.data() };
+    },
+    async recoverProfile(uid, value) {
+      const name = normalizeDisplayName(value.name);
+      const emoji = normalizeEmoji(value.emoji);
+      const pin = normalizeRecoveryPin(value.recoveryPin);
+      const nameKey = profileNameKey(name);
+      const nameRef = db.collection("profileNames").doc(encodeURIComponent(nameKey));
+      let previousUid = null;
+      await db.runTransaction(async (transaction) => {
+        const nameSnapshot = await transaction.get(nameRef);
+        if (!nameSnapshot.exists) throw createServiceError("profile-not-found", "No profile uses that name", 404);
+        previousUid = nameSnapshot.data().uid;
+        const previousRef = db.collection("profiles").doc(previousUid);
+        const currentRef = db.collection("profiles").doc(uid);
+        const previousSnapshot = await transaction.get(previousRef);
+        const currentSnapshot = previousUid === uid ? previousSnapshot : await transaction.get(currentRef);
+        if (!previousSnapshot.exists) throw createServiceError("profile-not-found", "That profile could not be recovered", 404);
+        const previous = { uid: previousUid, ...previousSnapshot.data() };
+        const legacyMatch = !previous.recoveryHash && previous.emoji === emoji;
+        if (!legacyMatch && !recoveryPinMatches(previous, pin)) {
+          throw createServiceError("invalid-recovery-pin", "That recovery PIN is incorrect", 403);
+        }
+        const verifier = createRecoveryVerifier(pin);
+        transaction.set(currentRef, {
+          ...previousSnapshot.data(),
+          ...verifier,
+          name,
+          nameKey,
+          emoji,
+          updatedAt: FieldValue.serverTimestamp()
+        });
+        const currentNameKey = currentSnapshot.exists ? currentSnapshot.data().nameKey : null;
+        if (currentNameKey && currentNameKey !== nameKey) {
+          transaction.delete(db.collection("profileNames").doc(encodeURIComponent(currentNameKey)));
+        }
+        if (previousUid !== uid) transaction.delete(previousRef);
+        transaction.set(nameRef, { uid, updatedAt: FieldValue.serverTimestamp() });
+      });
+      if (previousUid && previousUid !== uid) {
+        const challengeRefs = await db.collection("dailyChallenges").listDocuments();
+        for (let offset = 0; offset < challengeRefs.length; offset += 200) {
+          const chunk = challengeRefs.slice(offset, offset + 200);
+          const refs = chunk.flatMap((challengeRef) => [
+            challengeRef.collection("scores").doc(previousUid),
+            challengeRef.collection("scores").doc(uid)
+          ]);
+          const snapshots = refs.length ? await db.getAll(...refs) : [];
+          const batch = db.batch();
+          let movedScores = 0;
+          chunk.forEach((challengeRef, index) => {
+            const oldSnapshot = snapshots[index * 2];
+            const currentSnapshot = snapshots[index * 2 + 1];
+            if (!oldSnapshot?.exists) return;
+            const oldScore = oldSnapshot.data();
+            const currentScore = currentSnapshot?.exists ? currentSnapshot.data() : null;
+            batch.set(challengeRef.collection("scores").doc(uid), {
+              ...oldScore,
+              uid,
+              bestMs: Math.max(Number(oldScore.bestMs || 0), Number(currentScore?.bestMs || 0)),
+              attempts: Number(oldScore.attempts || 0) + Number(currentScore?.attempts || 0),
+              updatedAt: FieldValue.serverTimestamp()
+            });
+            batch.delete(oldSnapshot.ref);
+            movedScores++;
+          });
+          if (movedScores) await batch.commit();
+        }
+      }
+      const saved = await db.collection("profiles").doc(uid).get();
+      return { uid, ...saved.data() };
     },
     async getDailyChallenge(day) {
       const snapshot = await db.collection("dailyChallenges").doc(day).get();

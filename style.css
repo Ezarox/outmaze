@@ -1280,7 +1280,8 @@ body.vs-mode .resource-toolbar {
 
 .profile-lead,
 .profile-account,
-.profile-status {
+.profile-status,
+.profile-field-hint {
   color: var(--muted);
   font-size: 0.8rem;
   line-height: 1.5;
@@ -1313,6 +1314,10 @@ body.vs-mode .resource-toolbar {
   background: #07100d;
   color: var(--text);
   font-size: 0.88rem;
+}
+
+.profile-field-hint {
+  font-weight: 500;
 }
 
 .profile-emoji-grid {

@@ -3,6 +3,7 @@
 
   const FIREBASE_VERSION = "12.16.0";
   const PROFILE_CACHE_PREFIX = "outmaze.profile.v1.";
+  const PROFILE_RECOVERY_KEY = "outmaze.profile.recovery.v1";
   const EMOJIS = [
     "😀", "😎", "🤓", "🥳", "🤠", "👻", "🤖", "👽",
     "🐸", "🐱", "🐶", "🦊", "🐼", "🐙", "🦄", "🐲",
@@ -21,6 +22,9 @@
     form: document.getElementById("profileForm"),
     account: document.getElementById("profileAccount"),
     name: document.getElementById("profileNameInput"),
+    pin: document.getElementById("profilePinInput"),
+    pinHint: document.getElementById("profilePinHint"),
+    recover: document.getElementById("profileRecover"),
     emojis: document.getElementById("profileEmojiGrid"),
     saveStatus: document.getElementById("profileSaveStatus"),
     menu: document.getElementById("menuProfile"),
@@ -75,13 +79,29 @@
     }
   }
 
-  function rememberProfile(profile) {
+  function cachedRecovery() {
+    try {
+      const recovery = JSON.parse(localStorage.getItem(PROFILE_RECOVERY_KEY) || "null");
+      if (!recovery?.name || !EMOJIS.includes(recovery.emoji) || !/^\d{6}$/.test(String(recovery.pin || ""))) return null;
+      return { name: String(recovery.name), emoji: recovery.emoji, pin: String(recovery.pin) };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function rememberProfile(profile, recoveryPin = "") {
     if (!state.user || !profile) return;
     try {
       localStorage.setItem(
         `${PROFILE_CACHE_PREFIX}${state.user.uid}`,
         JSON.stringify({ name: profile.name, emoji: profile.emoji })
       );
+      const previousRecovery = cachedRecovery();
+      const sameRecoveredProfile = previousRecovery?.name.toLocaleLowerCase("en-US") === profile.name.toLocaleLowerCase("en-US");
+      const pin = String(recoveryPin || (sameRecoveredProfile ? previousRecovery.pin : "") || "");
+      if (/^\d{6}$/.test(pin)) {
+        localStorage.setItem(PROFILE_RECOVERY_KEY, JSON.stringify({ name: profile.name, emoji: profile.emoji, pin }));
+      }
     } catch (_) {
       // The server remains the source of truth when browser storage is unavailable.
     }
@@ -121,12 +141,21 @@
     }
     if (signedIn) {
       if (elements.account) {
-        elements.account.textContent = "Saved automatically in this browser · clearing site data removes access";
+        elements.account.textContent = state.profile?.recoveryReady
+          ? "Saved in this browser · your PIN can recover it on another device"
+          : "Add a recovery PIN to protect this profile before the browser forgets it";
       }
       const displayedProfile = state.profile || cachedProfile();
       if (elements.name && document.activeElement !== elements.name) elements.name.value = displayedProfile?.name || "";
       state.selectedEmoji = displayedProfile?.emoji || state.selectedEmoji || EMOJIS[0];
       renderEmojiSelection();
+      if (elements.pin) elements.pin.required = !state.profile;
+      if (elements.pinHint) {
+        elements.pinHint.textContent = state.profile
+          ? "Leave blank to keep your current PIN, or enter six digits to replace it."
+          : "Choose six digits for a new profile, or enter the existing PIN to recover one.";
+      }
+      elements.recover?.classList.toggle("hidden", Boolean(state.profile));
     }
     if (elements.menuEmoji) elements.menuEmoji.textContent = state.profile?.emoji || "👤";
     if (elements.menuName) elements.menuName.textContent = state.profile?.name || (signedIn ? "Finish profile" : "Create profile");
@@ -168,17 +197,24 @@
       const result = await api("/api/profile");
       state.profile = result.profile || null;
       if (!state.profile) {
-        const remembered = cachedProfile();
-        if (remembered) {
-          const restored = await api("/api/profile", {
+        const recovery = cachedRecovery();
+        if (recovery) {
+          const restored = await api("/api/profile/recover", {
             method: "POST",
-            body: JSON.stringify({ name: remembered.name, emoji: remembered.emoji })
+            body: JSON.stringify({ name: recovery.name, emoji: recovery.emoji, recoveryPin: recovery.pin })
           });
           state.profile = restored.profile || null;
         }
       }
       rememberProfile(state.profile);
     } catch (error) {
+      if (error.code === "invalid-recovery-pin" || error.code === "profile-not-found") {
+        try {
+          localStorage.removeItem(PROFILE_RECOVERY_KEY);
+        } catch (_) {
+          // The recovery form remains available when storage cannot be changed.
+        }
+      }
       if (error.code !== "profile-required" && error.status !== 404) {
         setStatus(elements.saveStatus, error.message, true);
       }
@@ -217,14 +253,53 @@
     event.preventDefault();
     setStatus(elements.saveStatus, "Saving profile…");
     try {
+      const recoveryPin = String(elements.pin?.value || "").trim();
+      if (!state.profile && !/^\d{6}$/.test(recoveryPin)) {
+        throw new Error("Choose a 6-digit recovery PIN");
+      }
       const result = await api("/api/profile", {
         method: "POST",
-        body: JSON.stringify({ name: elements.name?.value || "", emoji: state.selectedEmoji })
+        body: JSON.stringify({
+          name: elements.name?.value || "",
+          emoji: state.selectedEmoji,
+          ...(recoveryPin ? { recoveryPin } : {})
+        })
       });
       state.profile = result.profile;
-      rememberProfile(state.profile);
+      rememberProfile(state.profile, recoveryPin);
+      if (elements.pin) elements.pin.value = "";
       render();
       setStatus(elements.saveStatus, "Profile saved.");
+      window.dispatchEvent(new CustomEvent("outmaze-profile-changed", { detail: state.profile }));
+      close({ cancelPending: false });
+      resolvePending(state.profile);
+    } catch (error) {
+      setStatus(elements.saveStatus, error.message, true);
+    }
+  }
+
+  async function recoverProfile() {
+    const recoveryPin = String(elements.pin?.value || "").trim();
+    if (!/^\d{6}$/.test(recoveryPin)) {
+      setStatus(elements.saveStatus, "Enter your 6-digit recovery PIN", true);
+      elements.pin?.focus();
+      return;
+    }
+    setStatus(elements.saveStatus, "Recovering profile…");
+    try {
+      const result = await api("/api/profile/recover", {
+        method: "POST",
+        body: JSON.stringify({
+          name: elements.name?.value || "",
+          emoji: state.selectedEmoji,
+          recoveryPin
+        })
+      });
+      state.profile = result.profile;
+      rememberProfile(state.profile, recoveryPin);
+      if (elements.pin) elements.pin.value = "";
+      render();
+      setStatus(elements.saveStatus, "Profile recovered.");
       window.dispatchEvent(new CustomEvent("outmaze-profile-changed", { detail: state.profile }));
       close({ cancelPending: false });
       resolvePending(state.profile);
@@ -255,8 +330,9 @@
       import(`https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}/firebase-auth.js`)
     ]);
     state.authApi = authApi;
-    state.auth = authApi.getAuth(initializeApp(config.firebase));
-    await authApi.setPersistence(state.auth, authApi.browserLocalPersistence);
+    state.auth = authApi.initializeAuth(initializeApp(config.firebase), {
+      persistence: [authApi.indexedDBLocalPersistence, authApi.browserLocalPersistence]
+    });
     setStatus(elements.authStatus, "Preparing your browser profile…");
     await new Promise((resolve, reject) => {
       let initial = true;
@@ -289,6 +365,7 @@
   elements.close?.addEventListener("click", () => close());
   elements.anonymous?.addEventListener("click", () => location.reload());
   elements.form?.addEventListener("submit", saveProfile);
+  elements.recover?.addEventListener("click", recoverProfile);
   elements.overlay?.addEventListener("mousedown", (event) => {
     if (event.target === elements.overlay) close();
   });

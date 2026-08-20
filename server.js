@@ -25,6 +25,8 @@ const DEFAULT_IDLE_CONNECTION_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_ROOM_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_CLEANUP_INTERVAL_MS = 30 * 1000;
 const DEFAULT_PARTY_INTERMISSION_MS = 10 * 1000;
+const PROFILE_RECOVERY_WINDOW_MS = 15 * 60 * 1000;
+const PROFILE_RECOVERY_ATTEMPTS = 5;
 const GRID_SIZE = 21;
 const MAX_CELL_VALUE = 15;
 const ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -71,6 +73,11 @@ function sendJson(res, status, payload, headers = {}) {
     ...headers
   });
   res.end(JSON.stringify(payload));
+}
+
+function accountProfile(profile) {
+  const visible = publicProfile(profile);
+  return visible ? { ...visible, recoveryReady: Boolean(profile.recoveryHash) } : null;
 }
 
 function readJsonBody(req, maxBytes = 300 * 1024) {
@@ -259,6 +266,27 @@ function createOutmazeServer(options = {}) {
   const cleanupIntervalMs = Number(options.cleanupIntervalMs ?? DEFAULT_CLEANUP_INTERVAL_MS);
   const partyIntermissionMs = Math.max(0, Number(options.partyIntermissionMs ?? DEFAULT_PARTY_INTERMISSION_MS));
   const partyPlaybackScale = Math.max(0, Number(options.partyPlaybackScale ?? 1));
+  const recoveryAttempts = new Map();
+
+  function recoveryAttemptKey(req, name) {
+    const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+    return `${forwarded || req.socket.remoteAddress || "unknown"}:${String(name || "").trim().toLocaleLowerCase("en-US")}`;
+  }
+
+  function allowRecoveryAttempt(req, name) {
+    const key = recoveryAttemptKey(req, name);
+    const timestamp = now();
+    const recent = (recoveryAttempts.get(key) || []).filter((attempt) => timestamp - attempt < PROFILE_RECOVERY_WINDOW_MS);
+    if (recent.length >= PROFILE_RECOVERY_ATTEMPTS) {
+      throw Object.assign(new Error("Too many recovery attempts. Try again in 15 minutes"), {
+        code: "recovery-rate-limited",
+        status: 429
+      });
+    }
+    recent.push(timestamp);
+    recoveryAttempts.set(key, recent);
+    return () => recoveryAttempts.delete(key);
+  }
 
   async function authenticateRequest(req, required = true) {
     const authorization = String(req.headers.authorization || "");
@@ -273,14 +301,27 @@ function createOutmazeServer(options = {}) {
   async function apiHandler(req, res, requestPath, corsHeaders) {
     if (requestPath === "/api/profile" && req.method === "GET") {
       const identity = await authenticateRequest(req);
-      sendJson(res, 200, { profile: publicProfile(await store.getProfile(identity.uid)) }, corsHeaders);
+      sendJson(res, 200, { profile: accountProfile(await store.getProfile(identity.uid)) }, corsHeaders);
       return;
     }
     if (requestPath === "/api/profile" && (req.method === "POST" || req.method === "PUT")) {
       const identity = await authenticateRequest(req);
       const body = await readJsonBody(req, 16 * 1024);
+      const previous = await store.getProfile(identity.uid);
+      if (!previous && !body.recoveryPin) {
+        throw Object.assign(new Error("Choose a 6-digit recovery PIN"), { code: "recovery-pin-required", status: 400 });
+      }
       const profile = await store.saveProfile(identity.uid, body);
-      sendJson(res, 200, { profile: publicProfile(profile) }, corsHeaders);
+      sendJson(res, 200, { profile: accountProfile(profile) }, corsHeaders);
+      return;
+    }
+    if (requestPath === "/api/profile/recover" && req.method === "POST") {
+      const identity = await authenticateRequest(req);
+      const body = await readJsonBody(req, 16 * 1024);
+      const clearAttempts = allowRecoveryAttempt(req, body.name);
+      const profile = await store.recoverProfile(identity.uid, body);
+      clearAttempts();
+      sendJson(res, 200, { profile: accountProfile(profile) }, corsHeaders);
       return;
     }
     if (requestPath === "/api/daily" && req.method === "GET") {

@@ -41,7 +41,7 @@
         </div>
         <button id="menuHowTo" class="button button--quiet menu-how-to" type="button">How to play</button>
       </div>
-      <p id="multiplayerNote" class="menu-footnote">Online modes remember your name and emoji in this browser.</p>
+      <p id="multiplayerNote" class="menu-footnote">Online profiles are remembered here and recoverable with your private PIN.</p>
     </div>
   </div>
 
@@ -68,6 +68,11 @@
           <span>Display name</span>
           <input id="profileNameInput" type="text" minlength="2" maxlength="18" autocomplete="nickname" required />
         </label>
+        <label class="profile-name-field">
+          <span>Recovery PIN</span>
+          <input id="profilePinInput" type="password" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" autocomplete="off" aria-describedby="profilePinHint" />
+          <small id="profilePinHint" class="profile-field-hint">Choose six digits so this profile can be recovered if your browser forgets it.</small>
+        </label>
         <fieldset class="profile-emoji-field">
           <legend>Choose an emoji</legend>
           <div id="profileEmojiGrid" class="profile-emoji-grid"></div>
@@ -75,6 +80,7 @@
         <p id="profileSaveStatus" class="profile-status" role="status" aria-live="polite"></p>
         <div class="profile-actions">
           <button class="button button--primary" type="submit">Save profile</button>
+          <button id="profileRecover" class="button button--quiet" type="button">Recover existing</button>
         </div>
       </form>
     </div>

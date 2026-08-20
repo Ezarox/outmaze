@@ -37,6 +37,47 @@ test("profiles normalize names, reserve them globally, and require an allowed em
   );
 });
 
+test("profile recovery transfers identity and Daily history without storing the PIN", async () => {
+  const store = createMemoryStore();
+  const original = await store.saveProfile("old-browser", {
+    name: "Recovery Fox",
+    emoji: "🦊",
+    recoveryPin: "246810"
+  });
+  assert.equal(original.recoveryPin, undefined);
+  assert.ok(original.recoveryHash);
+  await store.saveDailyScore("2026-08-20", "old-browser", 31_250);
+  await assert.rejects(
+    store.recoverProfile("new-browser", { name: "Recovery Fox", emoji: "🦊", recoveryPin: "111111" }),
+    (error) => error.code === "invalid-recovery-pin"
+  );
+  const recovered = await store.recoverProfile("new-browser", {
+    name: "Recovery Fox",
+    emoji: "🦊",
+    recoveryPin: "246810"
+  });
+  assert.equal(recovered.uid, "new-browser");
+  assert.equal(await store.getProfile("old-browser"), null);
+  assert.equal((await store.getDailyScore("2026-08-20", "new-browser")).bestMs, 31_250);
+  assert.equal(await store.getDailyScore("2026-08-20", "old-browser"), null);
+});
+
+test("legacy profiles can set their first recovery PIN with their original emoji", async () => {
+  const store = createMemoryStore();
+  await store.saveProfile("legacy-browser", { name: "Legacy Fox", emoji: "🦊" });
+  await assert.rejects(
+    store.recoverProfile("new-browser", { name: "Legacy Fox", emoji: "🐸", recoveryPin: "123456" }),
+    (error) => error.code === "invalid-recovery-pin"
+  );
+  const recovered = await store.recoverProfile("new-browser", {
+    name: "Legacy Fox",
+    emoji: "🦊",
+    recoveryPin: "123456"
+  });
+  assert.ok(recovered.recoveryHash);
+  assert.equal(recovered.uid, "new-browser");
+});
+
 test("local development identities are deterministic and do not accept empty ids", async () => {
   const auth = createAuthService({ firebase: false, allowDevTokens: true });
   assert.equal((await auth.verify("dev:player-one")).uid, "player-one");
