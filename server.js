@@ -3,9 +3,13 @@ const fs = require("fs");
 const path = require("path");
 const WebSocket = require("ws");
 const {
+  AICore,
+  PROFILE_EMOJIS,
+  buildPartyAiMaze,
   createAuthService,
   createDailyService,
   createFirestoreStore,
+  createLocalFileStore,
   createMemoryStore,
   publicProfile,
   scorePartyPlacements,
@@ -20,10 +24,15 @@ const DEFAULT_AUTH_TIMEOUT_MS = 10 * 1000;
 const DEFAULT_IDLE_CONNECTION_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_ROOM_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_CLEANUP_INTERVAL_MS = 30 * 1000;
+const DEFAULT_PARTY_INTERMISSION_MS = 10 * 1000;
 const GRID_SIZE = 21;
 const MAX_CELL_VALUE = 15;
 const ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const SPECIAL_TYPES = new Set(["radius", "row", "column", "gravity", "lightning"]);
+const PARTY_BOT_NAMES = Object.freeze([
+  "Moss", "Pixel", "Nova", "Orbit", "Echo", "Rune", "Comet", "Sprout",
+  "Marble", "Tangle", "Circuit", "Ziggy", "Noodle", "Pebble", "Quill", "Bramble"
+]);
 const DEFAULT_PUBLIC_SITE_URL = process.env.PUBLIC_SITE_URL || "https://ezarox.github.io/outmaze/";
 const PUBLIC_FILES = new Set([
   "index.html",
@@ -239,6 +248,8 @@ function createOutmazeServer(options = {}) {
     allowDevTokens
   });
   const dailyService = options.dailyService || createDailyService({ store });
+  const partyAiBuilder = options.partyAiBuilder || (({ seed, variant, usedSignatures }) =>
+    buildPartyAiMaze(seed, variant, usedSignatures));
   const requireProfiles = options.requireProfiles ?? process.env.REQUIRE_PROFILES === "true";
   const authTimeoutMs = Number(options.authTimeoutMs ?? process.env.AUTH_TIMEOUT_MS ?? DEFAULT_AUTH_TIMEOUT_MS);
   const idleConnectionTimeoutMs = Number(
@@ -246,6 +257,8 @@ function createOutmazeServer(options = {}) {
   );
   const roomIdleTimeoutMs = Number(options.roomIdleTimeoutMs ?? process.env.ROOM_IDLE_TIMEOUT_MS ?? DEFAULT_ROOM_IDLE_TIMEOUT_MS);
   const cleanupIntervalMs = Number(options.cleanupIntervalMs ?? DEFAULT_CLEANUP_INTERVAL_MS);
+  const partyIntermissionMs = Math.max(0, Number(options.partyIntermissionMs ?? DEFAULT_PARTY_INTERMISSION_MS));
+  const partyPlaybackScale = Math.max(0, Number(options.partyPlaybackScale ?? 1));
 
   async function authenticateRequest(req, required = true) {
     const authorization = String(req.headers.authorization || "");
@@ -272,7 +285,8 @@ function createOutmazeServer(options = {}) {
     }
     if (requestPath === "/api/daily" && req.method === "GET") {
       const identity = await authenticateRequest(req, false);
-      sendJson(res, 200, await dailyService.get(identity?.uid || null), corsHeaders);
+      const requestedDay = new URL(req.url, "http://outmaze.local").searchParams.get("day");
+      sendJson(res, 200, await dailyService.get(identity?.uid || null, requestedDay), corsHeaders);
       return;
     }
     if (requestPath === "/api/daily/submit" && req.method === "POST") {
@@ -340,6 +354,20 @@ function createOutmazeServer(options = {}) {
     return player.identity?.uid || `anonymous-${player.slot}`;
   }
 
+  function partyParticipants(room) {
+    return room.players.concat(room.bots || []);
+  }
+
+  function partySubmissionKey(player) {
+    return player.bot ? playerUid(player) : player.ws;
+  }
+
+  function resequenceParty(room) {
+    partyParticipants(room).forEach((player, index) => {
+      player.slot = index + 1;
+    });
+  }
+
   function memberState(room, player) {
     const uid = playerUid(player);
     return {
@@ -347,10 +375,12 @@ function createOutmazeServer(options = {}) {
       slot: player.slot,
       name: player.profile?.name || `Player ${player.slot}`,
       emoji: player.profile?.emoji || "👤",
-      host: room.players[0] === player,
-      ready: room.ready.has(player.ws),
-      early: room.earlyVotes.has(player.ws),
-      score: Number(room.scores?.get(uid) || 0)
+      bot: Boolean(player.bot),
+      host: !player.bot && room.players[0] === player,
+      ready: Boolean(player.bot) || room.ready.has(player.ws),
+      early: Boolean(player.bot) || room.earlyVotes.has(player.ws),
+      score: Number(room.scores?.get(uid) || 0),
+      totalTime: Number(room.totalTimes?.get(uid) || 0)
     };
   }
 
@@ -365,7 +395,9 @@ function createOutmazeServer(options = {}) {
         rounds: room.roundsTotal,
         seed: room.seed || "",
         locked: room.locked,
-        members: room.players.map((player) => memberState(room, player))
+        preparing: Boolean(room.preparingBots),
+        nextRoundAt: room.nextRoundAt || null,
+        members: partyParticipants(room).map((player) => memberState(room, player))
       };
     }
     return {
@@ -399,9 +431,15 @@ function createOutmazeServer(options = {}) {
   }
 
   function clearRoomTimer(room) {
-    if (!room.lockTimer) return;
-    clearTimeout(room.lockTimer);
-    room.lockTimer = null;
+    if (room.lockTimer) {
+      clearTimeout(room.lockTimer);
+      room.lockTimer = null;
+    }
+    if (room.nextRoundTimer) {
+      clearTimeout(room.nextRoundTimer);
+      room.nextRoundTimer = null;
+    }
+    room.nextRoundAt = null;
   }
 
   function resetRoundState(room) {
@@ -474,6 +512,72 @@ function createOutmazeServer(options = {}) {
     return Math.max(1, Math.min(10, Number(value) | 0 || 3));
   }
 
+  function createPartyBot(room) {
+    const usedNames = new Set(partyParticipants(room).map((member) => member.profile?.name));
+    const startIndex = Math.floor(random() * PARTY_BOT_NAMES.length);
+    let name = PARTY_BOT_NAMES[(startIndex + room.botCounter) % PARTY_BOT_NAMES.length];
+    for (let offset = 0; offset < PARTY_BOT_NAMES.length && usedNames.has(name); offset++) {
+      name = PARTY_BOT_NAMES[(startIndex + room.botCounter + offset + 1) % PARTY_BOT_NAMES.length];
+    }
+    const counter = ++room.botCounter;
+    const uid = `bot-${room.code.toLowerCase()}-${counter}`;
+    return {
+      bot: true,
+      slot: partyParticipants(room).length + 1,
+      identity: { uid },
+      profile: {
+        uid,
+        name,
+        emoji: PROFILE_EMOJIS[(Math.floor(random() * PROFILE_EMOJIS.length) + counter) % PROFILE_EMOJIS.length]
+      },
+      variant: counter - 1
+    };
+  }
+
+  function fillPartyWithBots(room) {
+    while (partyParticipants(room).length < 8) room.bots.push(createPartyBot(room));
+    resequenceParty(room);
+  }
+
+  function adjustPartyBots(room, delta) {
+    if (delta > 0 && partyParticipants(room).length < 8) room.bots.push(createPartyBot(room));
+    if (delta < 0 && room.bots.length) room.bots.pop();
+    resequenceParty(room);
+  }
+
+  async function preparePartyBotSubmissions(room) {
+    const usedSignatures = new Set();
+    for (const bot of room.bots) {
+      let layout;
+      let validated;
+      try {
+        layout = await partyAiBuilder({
+          seed: room.seed,
+          variant: bot.variant,
+          usedSignatures
+        });
+        if (layout?.grid) validated = validateMazeForSeed(room.seed, layout);
+      } catch (_) {
+        layout = null;
+      }
+      if (!validated) {
+        const round = AICore.createRound(room.seed);
+        layout = {
+          grid: AICore.cloneGrid(round.baseGrid),
+          special: AICore.cloneSpecial(round.specialTemplate)
+        };
+        validated = validateMazeForSeed(room.seed, layout);
+      }
+      const payload = { grid: validated.grid, special: validated.special };
+      const signature = layout.signature || JSON.stringify(payload);
+      usedSignatures.add(signature);
+      room.submissions.set(partySubmissionKey(bot), {
+        payload,
+        time: simulateValidatedMaze(validated)
+      });
+    }
+  }
+
   function lockPartyRound(room, reason) {
     if (room.mode !== "party" || room.phase !== "building" || room.locked) return;
     room.locked = true;
@@ -482,44 +586,54 @@ function createOutmazeServer(options = {}) {
     broadcastRoomState(room);
   }
 
-  function startPartyRound(room, resetMatch = false) {
-    if (room.mode !== "party" || room.players.length < 2) return;
-    touchRoom(room);
-    resetRoundState(room);
-    if (resetMatch) {
-      room.roundNumber = 0;
-      room.scores.clear();
+  async function startPartyRound(room, resetMatch = false) {
+    if (room.mode !== "party" || partyParticipants(room).length < 2 || room.preparingBots) return;
+    room.preparingBots = true;
+    broadcast(room, { type: "party-preparing", bots: room.bots.length });
+    try {
+      touchRoom(room);
+      resetRoundState(room);
+      if (resetMatch) {
+        room.roundNumber = 0;
+        room.scores.clear();
+        room.totalTimes.clear();
+      }
+      room.phase = "building";
+      room.roundId += 1;
+      room.roundNumber += 1;
+      room.seed = Math.floor(random() * 1e9).toString();
+      await preparePartyBotSubmissions(room);
+      const startsAt = now() + startDelayMs;
+      const buildEndsAt = startsAt + buildSeconds * 1000;
+      broadcast(room, {
+        type: "party-start",
+        room: room.code,
+        roundId: room.roundId,
+        round: room.roundNumber,
+        rounds: room.roundsTotal,
+        seed: room.seed,
+        startsAt,
+        buildEndsAt,
+        buildSeconds
+      });
+      room.lockTimer = setTimeout(() => lockPartyRound(room, "timer"), Math.max(0, buildEndsAt - now()));
+    } finally {
+      room.preparingBots = false;
+      broadcastRoomState(room);
     }
-    room.phase = "building";
-    room.roundId += 1;
-    room.roundNumber += 1;
-    room.seed = Math.floor(random() * 1e9).toString();
-    const startsAt = now() + startDelayMs;
-    const buildEndsAt = startsAt + buildSeconds * 1000;
-    broadcast(room, {
-      type: "party-start",
-      room: room.code,
-      roundId: room.roundId,
-      round: room.roundNumber,
-      rounds: room.roundsTotal,
-      seed: room.seed,
-      startsAt,
-      buildEndsAt,
-      buildSeconds
-    });
-    room.lockTimer = setTimeout(() => lockPartyRound(room, "timer"), Math.max(0, buildEndsAt - now()));
-    broadcastRoomState(room);
   }
 
   function revealPartyIfReady(room) {
-    if (room.mode !== "party" || room.players.length < 2 || room.submissions.size !== room.players.length) return;
+    const participants = partyParticipants(room);
+    if (room.mode !== "party" || participants.length < 2 || room.submissions.size !== participants.length) return;
     room.phase = "results";
     const placements = scorePartyPlacements(
-      room.players.map((player) => {
-        const submission = room.submissions.get(player.ws);
+      participants.map((player) => {
+        const submission = room.submissions.get(partySubmissionKey(player));
         const member = memberState(room, player);
         return {
           uid: member.uid,
+          slot: member.slot,
           profile: { uid: member.uid, name: member.name, emoji: member.emoji },
           time: submission.time,
           maze: submission.payload
@@ -528,18 +642,40 @@ function createOutmazeServer(options = {}) {
     );
     placements.forEach((entry) => {
       room.scores.set(entry.uid, Number(room.scores.get(entry.uid) || 0) + entry.points);
+      room.totalTimes.set(entry.uid, Number(room.totalTimes.get(entry.uid) || 0) + Number(entry.time || 0));
       entry.totalPoints = room.scores.get(entry.uid);
+      entry.totalTime = room.totalTimes.get(entry.uid);
     });
+    const finalRound = room.roundNumber >= room.roundsTotal;
+    const longestTime = placements.reduce((longest, entry) => Math.max(longest, Number(entry.time) || 0), 0);
+    const racePlaybackMs = Math.ceil(longestTime * 1000 * partyPlaybackScale);
+    const nextRoundAt = finalRound ? null : now() + racePlaybackMs + partyIntermissionMs;
+    room.nextRoundAt = nextRoundAt;
     broadcast(room, {
       type: "party-results",
       room: room.code,
       roundId: room.roundId,
       round: room.roundNumber,
       rounds: room.roundsTotal,
-      finalRound: room.roundNumber >= room.roundsTotal,
+      finalRound,
+      nextRoundAt,
       entries: placements
     });
     broadcastRoomState(room);
+    if (!finalRound) {
+      const expectedRoundId = room.roundId;
+      room.nextRoundTimer = setTimeout(() => {
+        room.nextRoundTimer = null;
+        room.nextRoundAt = null;
+        if (rooms.get(room.code) !== room || room.phase !== "results" || room.roundId !== expectedRoundId) return;
+        startPartyRound(room, false).catch(() => {
+          room.preparingBots = false;
+          broadcast(room, { type: "error", code: "party-round-failed", error: "The next party round could not be prepared" });
+          broadcastRoomState(room);
+        });
+      }, Math.max(0, nextRoundAt - now()));
+      room.nextRoundTimer.unref?.();
+    }
   }
 
   function revealMazesIfReady(room) {
@@ -570,6 +706,7 @@ function createOutmazeServer(options = {}) {
     room.submissions.delete(ws);
     room.rematchChoices?.delete(ws);
     room.scores?.delete(playerUid(departed));
+    room.totalTimes?.delete(playerUid(departed));
     if (room.mode === "party") {
       if (!room.players.length) {
         clearRoomTimer(room);
@@ -580,11 +717,13 @@ function createOutmazeServer(options = {}) {
       room.players.forEach((player, index) => {
         player.slot = index + 1;
       });
-      if (room.players.length < 2 && room.phase !== "lobby") {
+      resequenceParty(room);
+      if (partyParticipants(room).length < 2 && room.phase !== "lobby") {
         resetRoundState(room);
         room.phase = "lobby";
         room.roundNumber = 0;
         room.scores.clear();
+        room.totalTimes.clear();
       } else if (room.phase === "building" && room.locked) {
         revealPartyIfReady(room);
       } else if (room.phase === "building" && room.earlyVotes.size === room.players.length) {
@@ -651,16 +790,22 @@ function createOutmazeServer(options = {}) {
         code,
         mode,
         players: [makePlayer(1)],
+        bots: [],
+        botCounter: 0,
+        preparingBots: false,
         ready: new Set(),
         submissions: new Map(),
         earlyVotes: new Set(),
         rematchChoices: new Map(),
         scores: new Map(),
+        totalTimes: new Map(),
         phase: "lobby",
         roundId: 0,
         seed: "",
         locked: false,
         lockTimer: null,
+        nextRoundTimer: null,
+        nextRoundAt: null,
         lastActivityAt: now()
       };
     }
@@ -770,16 +915,20 @@ function createOutmazeServer(options = {}) {
             send(ws, { type: "error", code: "same-account", error: "This profile is already in that party" });
             return;
           }
-          if (room.players.length >= 8) {
-            send(ws, { type: "error", code: "room-full", error: "This party already has eight players" });
-            return;
-          }
           if (room.phase !== "lobby") {
             send(ws, { type: "error", code: "round-active", error: "That party has already started" });
             return;
           }
+          if (partyParticipants(room).length >= 8) {
+            if (room.bots.length) room.bots.pop();
+            else {
+              send(ws, { type: "error", code: "room-full", error: "This party already has eight players" });
+              return;
+            }
+          }
           leaveCurrentRoom();
           room.players.push(makePlayer(room.players.length + 1));
+          resequenceParty(room);
           touchRoom(room);
           currentRoom = code;
           ws.outmazeRoom = code;
@@ -806,6 +955,20 @@ function createOutmazeServer(options = {}) {
             broadcastRoomState(room);
             return;
           }
+          if (type === "party-fill-ai") {
+            if (room.players[0] !== player || room.phase !== "lobby" || room.preparingBots) return;
+            if (message.enabled === false) room.bots.length = 0;
+            else fillPartyWithBots(room);
+            resequenceParty(room);
+            broadcastRoomState(room);
+            return;
+          }
+          if (type === "party-ai-adjust") {
+            if (room.players[0] !== player || room.phase !== "lobby" || room.preparingBots) return;
+            adjustPartyBots(room, Math.sign(Number(message.delta) || 0));
+            broadcastRoomState(room);
+            return;
+          }
           if (type === "party-ready") {
             if (room.phase !== "lobby") return;
             if (message.ready) room.ready.add(ws);
@@ -815,11 +978,11 @@ function createOutmazeServer(options = {}) {
           }
           if (type === "party-start") {
             if (room.players[0] !== player || room.phase !== "lobby") return;
-            if (room.players.length < 2 || room.ready.size !== room.players.length) {
+            if (partyParticipants(room).length < 2 || room.ready.size !== room.players.length) {
               send(ws, { type: "error", code: "party-not-ready", error: "Every player must be ready before the party starts" });
               return;
             }
-            startPartyRound(room, true);
+            await startPartyRound(room, true);
             return;
           }
           if (type === "party-early-start") {
@@ -844,7 +1007,7 @@ function createOutmazeServer(options = {}) {
               type: "party-maze-accepted",
               roundId: room.roundId,
               submitted: room.submissions.size,
-              required: room.players.length
+              required: partyParticipants(room).length
             });
             revealPartyIfReady(room);
             return;
@@ -852,8 +1015,8 @@ function createOutmazeServer(options = {}) {
           if (type === "party-next") {
             if (room.players[0] !== player || room.phase !== "results") return;
             const complete = room.roundNumber >= room.roundsTotal;
-            if (complete && !message.restart) return;
-            startPartyRound(room, complete && Boolean(message.restart));
+            if (!complete || !message.restart) return;
+            await startPartyRound(room, true);
             return;
           }
           send(ws, { type: "error", code: "unknown-message", error: "Unknown party message type" });
@@ -961,7 +1124,12 @@ function createOutmazeServer(options = {}) {
 }
 
 if (require.main === module) {
-  const app = createOutmazeServer();
+  const usePersistentLocalStore = process.env.NODE_ENV !== "production" && process.env.FIRESTORE_ENABLED !== "true";
+  const app = createOutmazeServer({
+    store: usePersistentLocalStore
+      ? createLocalFileStore(path.join(__dirname, ".outmaze-local-data.json"))
+      : undefined
+  });
   app
     .listen()
     .then(() => console.log(`Outmaze server listening at http://localhost:${DEFAULT_PORT}`))

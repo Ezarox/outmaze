@@ -295,8 +295,14 @@ test("server locks both builders at the shared deadline", async (t) => {
   assert.equal(guestLock.roundId, guestStart.roundId);
 });
 
-test("party rooms synchronize three builders and award placement points", async (t) => {
-  const app = createOutmazeServer({ port: 0, buildSeconds: 30, random: () => 0.42 });
+test("party rooms synchronize three builders, award points, and automatically start the next round", async (t) => {
+  const app = createOutmazeServer({
+    port: 0,
+    buildSeconds: 30,
+    random: () => 0.42,
+    partyIntermissionMs: 20,
+    partyPlaybackScale: 0
+  });
   const address = await app.listen();
   const url = `ws://127.0.0.1:${address.port}`;
   const players = [createClient(url), createClient(url), createClient(url)];
@@ -334,15 +340,111 @@ test("party rooms synchronize three builders and award placement points", async 
   const results = await Promise.all(players.map((player) => player.next((message) => message.type === "party-results")));
   assert.equal(results[0].entries.length, 3);
   assert.equal(results[0].entries.every((entry) => entry.rank === 1 && entry.points === 2), true);
+  assert.equal(results[0].entries.every((entry) => entry.totalTime === entry.time), true);
+  assert.deepEqual(results[0].entries.map((entry) => entry.slot).sort((a, b) => a - b), [1, 2, 3]);
   assert.equal(results[0].finalRound, false);
+  assert.equal(results[0].nextRoundAt > Date.now(), true);
+  const nextStarts = await Promise.all(players.map((player) => player.next((message) => message.type === "party-start", 1000)));
+  assert.equal(nextStarts.every((message) => message.round === 2), true);
+  assert.equal(new Set(nextStarts.map((message) => message.roundId)).size, 1);
+});
+
+test("party host can add and remove ready AI players one at a time and play without another human", async (t) => {
+  const partyAiBuilder = ({ seed, variant }) => {
+    const round = AICore.createRound(seed);
+    return {
+      grid: AICore.cloneGrid(round.baseGrid),
+      special: AICore.cloneSpecial(round.specialTemplate),
+      signature: `test-bot-${variant}`
+    };
+  };
+  const app = createOutmazeServer({
+    port: 0,
+    buildSeconds: 30,
+    random: () => 0.31,
+    partyAiBuilder
+  });
+  const address = await app.listen();
+  const host = createClient(`ws://127.0.0.1:${address.port}`);
+  t.after(async () => {
+    host.close();
+    await app.close();
+  });
+  await host.opened;
+
+  host.send({ type: "party-create", rounds: 2 });
+  await host.next((message) => message.type === "party-created");
+  let filled;
+  for (let memberCount = 2; memberCount <= 8; memberCount++) {
+    host.send({ type: "party-ai-adjust", delta: 1 });
+    filled = await host.next(
+      (message) => message.type === "party-state" && message.members.length === memberCount
+    );
+  }
+  assert.equal(filled.members.filter((member) => member.bot).length, 7);
+  assert.equal(filled.members.filter((member) => member.bot).every((member) => member.ready), true);
+  assert.equal(new Set(filled.members.map((member) => member.uid)).size, 8);
+
+  host.send({ type: "party-ai-adjust", delta: -1 });
+  const reduced = await host.next(
+    (message) => message.type === "party-state" && message.members.length === 7
+  );
+  assert.equal(reduced.members.filter((member) => member.bot).length, 6);
+  host.send({ type: "party-ai-adjust", delta: 1 });
+  filled = await host.next((message) => message.type === "party-state" && message.members.length === 8);
+
+  host.send({ type: "party-ready", ready: true });
+  await host.next((message) => message.type === "party-state" && message.members.every((member) => member.ready));
+  host.send({ type: "party-start" });
+  const preparing = await host.next((message) => message.type === "party-preparing");
+  assert.equal(preparing.bots, 7);
+  const start = await host.next((message) => message.type === "party-start", 3000);
+
+  host.send({ type: "party-early-start", roundId: start.roundId, vote: true });
+  await host.next((message) => message.type === "party-lock");
+  const round = AICore.createRound(start.seed);
+  host.send({
+    type: "party-maze",
+    roundId: start.roundId,
+    payload: { grid: AICore.cloneGrid(round.baseGrid), special: AICore.cloneSpecial(round.specialTemplate) }
+  });
+  const results = await host.next((message) => message.type === "party-results", 3000);
+  assert.equal(results.entries.length, 8);
+  assert.equal(results.entries.filter((entry) => entry.uid.startsWith("bot-")).length, 7);
+  assert.deepEqual(results.entries.map((entry) => entry.slot).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8]);
+});
+
+test("a human joining a full AI-filled lobby replaces one bot", async (t) => {
+  const app = createOutmazeServer({ port: 0, random: () => 0.19 });
+  const address = await app.listen();
+  const url = `ws://127.0.0.1:${address.port}`;
+  const host = createClient(url);
+  const guest = createClient(url);
+  t.after(async () => {
+    host.close();
+    guest.close();
+    await app.close();
+  });
+  await Promise.all([host.opened, guest.opened]);
+  host.send({ type: "party-create", rounds: 1 });
+  const created = await host.next((message) => message.type === "party-created");
+  host.send({ type: "party-fill-ai", enabled: true });
+  await host.next((message) => message.type === "party-state" && message.members.length === 8);
+  guest.send({ type: "party-join", room: created.room });
+  await guest.next((message) => message.type === "party-joined");
+  const replaced = await host.next(
+    (message) => message.type === "party-state" && message.members.some((member) => member.uid === "anonymous-2")
+  );
+  assert.equal(replaced.members.length, 8);
+  assert.equal(replaced.members.filter((member) => member.bot).length, 6);
 });
 
 test("profile and daily HTTP APIs require identity and retain the best verified score", async (t) => {
   const store = createMemoryStore();
   const authService = { async verify(token) { return { uid: String(token) }; } };
   const dailyService = {
-    async get(uid) {
-      return { day: "2026-08-20", seed: "daily", aiTime: 10, leaderboard: [], uid };
+    async get(uid, day) {
+      return { day: day || "2026-08-20", seed: "daily", aiTime: 10, leaderboard: [], uid };
     },
     async submit(uid) {
       return { submittedTime: 12, personalBest: 12, attempts: 1, rank: 1, uid };
@@ -362,8 +464,10 @@ test("profile and daily HTTP APIs require identity and retain the best verified 
   });
   assert.equal(saved.status, 200);
   assert.equal((await saved.json()).profile.name, "Profile Fox");
-  const daily = await fetch(`${base}/api/daily`, { headers: { Authorization: "Bearer profile-user" } });
-  assert.equal((await daily.json()).uid, "profile-user");
+  const daily = await fetch(`${base}/api/daily?day=2026-08-19`, { headers: { Authorization: "Bearer profile-user" } });
+  const dailyBody = await daily.json();
+  assert.equal(dailyBody.uid, "profile-user");
+  assert.equal(dailyBody.day, "2026-08-19");
   const submitted = await fetch(`${base}/api/daily/submit`, {
     method: "POST",
     headers: { Authorization: "Bearer profile-user", "Content-Type": "application/json" },

@@ -29,17 +29,17 @@
         <strong>longest escape time wins</strong>.
       </p>
       <div class="menu-actions">
-        <button id="menuSingle" class="button button--primary button--large" type="button">Race the AI</button>
-        <button id="menuHowTo" class="button button--quiet" type="button">How to play</button>
-        <button id="menuVs" class="button button--quiet" type="button" aria-describedby="multiplayerNote">
-          Play a friend
-        </button>
-        <button id="menuParty" class="button button--quiet" type="button" aria-describedby="multiplayerNote">
-          Party mode
-        </button>
-        <button id="menuDaily" class="button button--quiet" type="button" aria-describedby="multiplayerNote">
-          Daily challenge
-        </button>
+        <div class="menu-action-group" aria-label="Solo">
+          <span class="menu-action-group__label">Solo</span>
+          <button id="menuSingle" class="button button--primary button--large" type="button">Single player</button>
+          <button id="menuDaily" class="button button--quiet" type="button" aria-describedby="multiplayerNote">Daily challenge</button>
+        </div>
+        <div class="menu-action-group" aria-label="Multiplayer">
+          <span class="menu-action-group__label">Multiplayer</span>
+          <button id="menuVs" class="button button--quiet" type="button" aria-describedby="multiplayerNote">1v1</button>
+          <button id="menuParty" class="button button--quiet" type="button" aria-describedby="multiplayerNote">Party (2-8)</button>
+        </div>
+        <button id="menuHowTo" class="button button--quiet menu-how-to" type="button">How to play</button>
       </div>
       <p id="multiplayerNote" class="menu-footnote">Online modes remember your name and emoji in this browser.</p>
     </div>
@@ -60,7 +60,6 @@
       <p id="profileLead" class="profile-lead">This browser keeps one name and emoji attached to friend rooms, parties, and Daily scores.</p>
       <div id="profileSignedOut" class="profile-auth-view">
         <button id="profileAnonymousSignIn" class="button button--primary button--large hidden" type="button">Retry profile setup</button>
-        <button id="profileDevSignIn" class="button button--primary button--large hidden" type="button">Continue with a local test profile</button>
         <p id="profileAuthStatus" class="profile-status" role="status" aria-live="polite"></p>
       </div>
       <form id="profileForm" class="profile-form hidden">
@@ -76,7 +75,6 @@
         <p id="profileSaveStatus" class="profile-status" role="status" aria-live="polite"></p>
         <div class="profile-actions">
           <button class="button button--primary" type="submit">Save profile</button>
-          <button id="profileSignOut" class="button button--quiet hidden" type="button">Leave local profile</button>
         </div>
       </form>
     </div>
@@ -206,9 +204,6 @@
           <p class="info-kicker">Party mode</p>
           <h3 id="partyTitle">Create or join a party</h3>
         </div>
-        <button id="partyCopyRoom" class="vs-room-badge hidden" type="button" title="Copy party code">
-          Room <strong id="partyRoomCode">-----</strong>
-        </button>
       </div>
       <p id="partyStatus" class="vs-status" role="status" aria-live="polite">Gather 2–8 players, then race across several seeds.</p>
       <div id="partyLobbyActions" class="party-lobby-actions">
@@ -225,17 +220,24 @@
         <button id="partyJoin" class="button button--quiet" type="button">Join party</button>
       </div>
       <div id="partyMatchActions" class="party-match-actions hidden">
+        <button id="partyCopyRoom" class="vs-room-badge hidden" type="button" title="Copy party code">
+          Room <strong id="partyRoomCode">-----</strong>
+        </button>
+        <div id="partyAiControl" class="party-ai-control hidden" role="group" aria-label="AI players">
+          <span>AI <strong id="partyAiCount">0</strong></span>
+          <button id="partyRemoveAi" type="button" aria-label="Remove one AI player">−</button>
+          <button id="partyAddAi" type="button" aria-label="Add one AI player">+</button>
+        </div>
         <button id="partyReady" class="button button--primary" type="button" aria-pressed="false">Ready up</button>
         <button id="partyStart" class="button button--quiet hidden" type="button">Start party</button>
-        <button id="partyEarlyStart" class="button button--quiet hidden" type="button" aria-pressed="false">Ready to start early</button>
         <button id="partyNext" class="button button--primary hidden" type="button">Next round</button>
-        <button id="partySkip" class="button button--quiet hidden" type="button">Skip race</button>
+        <span id="partyCountdown" class="party-countdown hidden" aria-live="polite">Next round in 10s</span>
       </div>
       <div id="partyProgress" class="party-progress hidden" aria-label="Party progress">
         <span id="partyRoundLabel">Round 1 of 3</span>
         <div class="party-progress-track"><i id="partyProgressFill"></i></div>
       </div>
-      <div id="partyRoster" class="party-roster" aria-label="Party players"></div>
+      <div id="partyRoster" class="party-roster" aria-label="Party players" aria-live="polite"></div>
       <button id="partyLeave" class="text-button vs-leave hidden" type="button">Leave party</button>
     </section>
 
@@ -245,7 +247,15 @@
           <p class="info-kicker">Daily challenge</p>
           <h3 id="dailyTitle">Today’s shared seed</h3>
         </div>
-        <span id="dailyDate" class="daily-date">----</span>
+        <div class="daily-history-controls" aria-label="Choose a Daily Challenge date">
+          <button id="dailyPrevious" class="daily-history-button" type="button" aria-label="Previous Daily Challenge">←</button>
+          <label class="daily-date">
+            <span class="sr-only">Challenge date</span>
+            <input id="dailyDate" type="date" />
+          </label>
+          <button id="dailyNext" class="daily-history-button" type="button" aria-label="Next Daily Challenge">→</button>
+          <button id="dailyToday" class="daily-today-button" type="button">Today</button>
+        </div>
       </div>
       <div class="daily-metrics">
         <div><span>AI benchmark</span><strong id="dailyAiTime">--</strong></div>
@@ -254,12 +264,31 @@
       </div>
       <p id="dailyStatus" class="vs-status" role="status" aria-live="polite">The AI time is public; its maze remains hidden.</p>
       <div id="dailyActions" class="daily-actions hidden">
+        <button id="dailyCancel" class="button button--quiet hidden" type="button">Cancel run &amp; edit</button>
         <button id="dailyModify" class="button button--primary" type="button">Modify maze</button>
         <button id="dailyBack" class="button button--quiet" type="button">Main menu</button>
       </div>
       <div class="daily-leaderboard-wrap">
         <div class="daily-leaderboard-heading"><strong>Global leaderboard</strong><span>Longest time wins</span></div>
         <ol id="dailyLeaderboard" class="daily-leaderboard"></ol>
+      </div>
+    </section>
+
+    <section class="round-panel hud hidden" id="gameHud" aria-label="Single player seed and round controls">
+      <div class="round-panel__heading">
+        <p class="info-kicker">Single player</p>
+        <h3>Seed and round controls</h3>
+        <p>Load a specific environment, start fresh, or reopen your current maze.</p>
+      </div>
+      <div class="controls">
+        <label class="seed-field">
+          <span>Seed</span>
+          <input id="seedInput" type="text" autocomplete="off" spellcheck="false" />
+        </label>
+        <button id="setSeed" type="button">Load seed</button>
+        <button id="randomSeed" type="button">New seed</button>
+        <button id="newGame" type="button">Restart seed</button>
+        <button id="editRetry" type="button">Modify maze</button>
       </div>
     </section>
 
@@ -287,6 +316,7 @@
 
       <div class="start-control">
         <button id="startRace" class="button button--start" type="button">Start now</button>
+        <button id="partyEarlyStart" class="button button--start hidden" type="button" aria-pressed="false">Ready to start early</button>
       </div>
     </section>
 
@@ -332,21 +362,6 @@
 
     <section id="partyGallery" class="party-gallery hidden" aria-label="Party maze race"></section>
 
-    <section class="hud hidden" id="gameHud" aria-label="Round options">
-      <details class="round-options">
-        <summary>Seed and round options</summary>
-        <div class="controls">
-          <label class="seed-field">
-            <span>Seed</span>
-            <input id="seedInput" type="text" autocomplete="off" spellcheck="false" />
-          </label>
-          <button id="setSeed" type="button">Load seed</button>
-          <button id="randomSeed" type="button">New seed</button>
-          <button id="newGame" type="button">Restart seed</button>
-          <button id="editRetry" type="button">Edit and retry</button>
-        </div>
-      </details>
-    </section>
   </main>
 
   <div id="resultPopup" class="result-popup hidden" role="dialog" aria-modal="true" aria-labelledby="popupMessage">
@@ -356,6 +371,15 @@
       <div id="popupEmoji" class="result-emoji" aria-hidden="true">😄</div>
       <p id="popupMessage">You win!</p>
       <button id="shareResult" class="button button--primary share-button" type="button">Copy result</button>
+    </div>
+  </div>
+
+  <div id="partyPodium" class="result-popup hidden" role="dialog" aria-modal="true" aria-labelledby="partyPodiumTitle">
+    <div class="result-card party-podium-card">
+      <button id="closePartyPodium" class="close-popup" type="button" aria-label="Close party results">&#215;</button>
+      <p class="eyebrow">Party complete</p>
+      <h2 id="partyPodiumTitle">Final podium</h2>
+      <div id="partyPodiumPlaces" class="party-podium-places"></div>
     </div>
   </div>
 

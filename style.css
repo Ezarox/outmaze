@@ -268,8 +268,28 @@ canvas:focus-visible {
 
 .menu-actions {
   display: grid;
-  gap: 0.65rem;
+  gap: 0.85rem;
   margin-top: 2rem;
+}
+
+.menu-action-group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.menu-action-group__label {
+  grid-column: 1 / -1;
+  color: var(--faint);
+  font-size: 0.58rem;
+  font-weight: 850;
+  letter-spacing: 0.12em;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.menu-how-to {
+  margin-top: 0.15rem;
 }
 
 .menu-footnote {
@@ -643,6 +663,7 @@ body.race-active .status-board {
 body.race-active .game-body {
   width: min(1380px, 100%);
   grid-template-columns: minmax(0, 1fr);
+  justify-items: center;
 }
 
 .canvas-wrapper {
@@ -830,6 +851,34 @@ body.race-active .hud {
   border-top: 1px solid var(--line);
   padding-top: 0.65rem;
   color: var(--muted);
+}
+
+.round-panel {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  align-items: end;
+  gap: 1rem;
+  margin: 0 auto 1rem;
+  border: 1px solid rgba(120, 247, 187, 0.2);
+  border-radius: var(--radius);
+  padding: 0.85rem 1rem;
+  background: linear-gradient(145deg, rgba(15, 31, 25, 0.9), rgba(8, 17, 14, 0.9));
+}
+
+.round-panel__heading h3 {
+  margin: 0.15rem 0 0;
+  font-size: 0.95rem;
+}
+
+.round-panel__heading > p:last-child {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.round-panel .controls {
+  justify-content: flex-end;
+  margin-top: 0;
 }
 
 .round-options summary {
@@ -1348,6 +1397,86 @@ body.vs-mode .resource-toolbar {
   gap: 0.45rem;
 }
 
+.party-match-actions > .button,
+.party-match-actions > .vs-room-badge,
+.party-match-actions > .party-ai-control {
+  min-height: 44px;
+}
+
+.party-match-actions > .vs-room-badge {
+  align-items: center;
+  display: inline-flex;
+}
+
+.party-countdown {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  border: 1px solid rgba(120, 247, 187, 0.28);
+  border-radius: 9px;
+  padding: 0.55rem 0.8rem;
+  background: rgba(120, 247, 187, 0.07);
+  color: var(--mint);
+  font-size: 0.72rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+body.party-mode #startRace {
+  display: none;
+}
+
+body:not(.party-mode) #partyEarlyStart {
+  display: none;
+}
+
+.party-ai-control {
+  display: grid;
+  width: 142px;
+  grid-template-columns: minmax(0, 1fr) 38px 38px;
+  align-items: stretch;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.party-ai-control > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
+.party-ai-control > span strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.party-ai-control button {
+  border: 0;
+  border-left: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 1.1rem;
+  font-weight: 850;
+}
+
+.party-ai-control button:hover:not(:disabled) {
+  background: rgba(120, 247, 187, 0.12);
+  color: var(--mint);
+}
+
+.party-ai-control button:disabled {
+  color: var(--faint);
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .party-rounds-field {
   display: grid;
   gap: 0.2rem;
@@ -1422,8 +1551,18 @@ body.vs-mode .resource-toolbar {
   background: rgba(207, 156, 255, 0.075);
 }
 
+.party-member.is-bot {
+  border-style: dashed;
+}
+
+.party-member.is-bot .party-member__copy small {
+  color: var(--purple);
+}
+
 .party-member__emoji {
+  width: 1.5rem;
   font-size: 1.2rem;
+  text-align: center;
 }
 
 .party-member__copy {
@@ -1450,8 +1589,148 @@ body.vs-mode .resource-toolbar {
 }
 
 .party-member__score {
+  min-width: 3.6rem;
   color: var(--amber);
   font-weight: 800;
+  text-align: right;
+}
+
+.party-roster.is-standings {
+  display: grid;
+  grid-template-columns: 1fr;
+  overflow-x: auto;
+}
+
+.party-roster.is-build-summary {
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: 0.35rem;
+  padding-top: 0.5rem;
+}
+
+.party-build-member {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "emoji name score"
+    "emoji status score";
+  align-items: center;
+  gap: 0 0.4rem;
+  border-radius: 7px;
+  padding: 0.3rem 0.42rem;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.party-build-member.is-ready {
+  background: rgba(120, 247, 187, 0.055);
+}
+
+.party-build-member__emoji {
+  grid-area: emoji;
+  font-size: 0.88rem;
+}
+
+.party-build-member strong {
+  grid-area: name;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 0.62rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.party-build-member small {
+  grid-area: status;
+  color: var(--faint);
+  font-size: 0.53rem;
+}
+
+.party-build-member b {
+  grid-area: score;
+  color: var(--amber);
+  font: 800 0.58rem ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.party-standing {
+  display: grid;
+  min-width: 700px;
+  grid-template-columns: minmax(170px, 1fr) 108px 140px 82px 92px;
+  align-items: center;
+  gap: 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 0.48rem 0.62rem;
+  background: rgba(255, 255, 255, 0.022);
+  color: var(--muted);
+  font-size: 0.67rem;
+  transition: border-color 180ms ease, background 180ms ease, transform 220ms ease;
+}
+
+.party-standing--heading {
+  border: 0;
+  padding-block: 0.12rem;
+  background: transparent;
+  color: var(--faint);
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.party-standing.is-finished {
+  border-color: rgba(120, 247, 187, 0.22);
+  color: var(--text);
+}
+
+.party-standing.is-self {
+  background: rgba(120, 247, 187, 0.075);
+}
+
+.party-standing__player {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.48rem;
+}
+
+.party-standing__player i {
+  width: 1.4rem;
+  flex: 0 0 auto;
+  font-size: 1rem;
+  font-style: normal;
+  text-align: center;
+}
+
+.party-standing__player strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 0.7rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.party-standing__time,
+.party-standing__placement,
+.party-standing__total,
+.party-standing__overall {
+  font-variant-numeric: tabular-nums;
+}
+
+.party-standing__time,
+.party-standing__total,
+.party-standing__overall {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.party-standing__total,
+.party-standing__overall {
+  color: var(--amber);
+  font-weight: 800;
+  text-align: right;
+}
+
+.party-standing__overall {
+  color: var(--mint);
 }
 
 .party-panel .vs-leave {
@@ -1470,12 +1749,51 @@ body.vs-mode .resource-toolbar {
   grid-column: 1;
 }
 
+.daily-history-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.32rem;
+}
+
 .daily-date {
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 0.35rem 0.58rem;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.daily-date input {
+  width: 8.4rem;
+  border: 0;
+  padding: 0;
+  outline: 0;
+  background: transparent;
   color: var(--mint);
+  color-scheme: dark;
   font: 750 0.65rem ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.daily-history-button,
+.daily-today-button {
+  min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.25rem 0.55rem;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.daily-history-button:hover:not(:disabled),
+.daily-today-button:hover:not(:disabled) {
+  border-color: rgba(120, 247, 187, 0.38);
+  color: var(--mint);
+}
+
+.daily-history-button:disabled,
+.daily-today-button:disabled {
+  opacity: 0.38;
+  cursor: default;
 }
 
 .daily-metrics {
@@ -1572,8 +1890,8 @@ body.vs-mode .resource-toolbar {
 
 .party-gallery {
   display: grid;
-  width: min(1220px, 100%);
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  width: min(1380px, 100%);
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 0.8rem;
   margin: 0 auto 1rem;
 }
@@ -1585,6 +1903,11 @@ body.vs-mode .resource-toolbar {
   background: #07100d;
 }
 
+.party-maze-card.is-running {
+  border-color: rgba(120, 247, 187, 0.58);
+  box-shadow: 0 0 0 1px rgba(120, 247, 187, 0.08), 0 0 18px rgba(120, 247, 187, 0.07);
+}
+
 .party-maze-card.is-finished {
   border-color: rgba(120, 247, 187, 0.35);
 }
@@ -1594,6 +1917,7 @@ body.vs-mode .resource-toolbar {
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 0.5rem;
+  min-height: 42px;
   padding: 0.58rem 0.7rem;
   background: rgba(255, 255, 255, 0.025);
 }
@@ -1606,15 +1930,67 @@ body.vs-mode .resource-toolbar {
 }
 
 .party-maze-card__result {
+  min-width: 7ch;
   color: var(--mint);
   font: 750 0.68rem ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-align: right;
 }
 
 .party-maze-card canvas {
   display: block;
   width: 100%;
   height: auto;
+  aspect-ratio: 1;
   background: #050807;
+  image-rendering: auto;
+}
+
+.party-podium-card {
+  width: min(430px, 100%);
+  text-align: center;
+}
+
+.party-podium-card h2 {
+  margin: 0.25rem 0 1.1rem;
+}
+
+.party-podium-places {
+  display: grid;
+  gap: 0.48rem;
+}
+
+.party-podium-place {
+  display: grid;
+  grid-template-columns: 34px 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.65rem 0.75rem;
+  background: rgba(255, 255, 255, 0.025);
+  text-align: left;
+}
+
+.party-podium-place--1 {
+  border-color: rgba(255, 201, 120, 0.45);
+  background: rgba(255, 201, 120, 0.07);
+}
+
+.party-podium-place__medal,
+.party-podium-place__emoji {
+  font-size: 1.35rem;
+  text-align: center;
+}
+
+.party-podium-place strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.party-podium-place b {
+  color: var(--amber);
+  font: 800 0.72rem ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 body.party-mode #vsPanel,
@@ -1638,6 +2014,14 @@ body.daily-mode #gameHud {
 }
 
 @media (max-width: 860px) {
+  .round-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .round-panel .controls {
+    justify-content: flex-start;
+  }
+
   .party-panel,
   .daily-panel {
     grid-template-columns: 1fr;
@@ -1668,6 +2052,15 @@ body.daily-mode #gameHud {
 }
 
 @media (max-width: 560px) {
+  .daily-summary {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .daily-history-controls {
+    flex-wrap: wrap;
+  }
+
   .profile-chip {
     position: static;
     justify-self: center;
@@ -1700,6 +2093,12 @@ body.daily-mode #gameHud {
   .party-maze-card {
     min-width: calc(100vw - 2rem);
     scroll-snap-align: center;
+  }
+}
+
+@media (max-width: 390px) {
+  .menu-action-group {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -1971,11 +2370,11 @@ body.daily-mode #gameHud {
     padding: 2rem 1.4rem;
   }
 
-  body.race-active .canvas-wrapper {
+  body.race-active .canvas-wrapper.race-view {
     overflow-x: auto;
   }
 
-  body.race-active canvas#game {
+  body.race-active .canvas-wrapper.race-view canvas#game {
     width: 900px;
     max-width: none;
   }

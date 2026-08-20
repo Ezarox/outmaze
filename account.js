@@ -2,6 +2,7 @@
   "use strict";
 
   const FIREBASE_VERSION = "12.16.0";
+  const PROFILE_CACHE_PREFIX = "outmaze.profile.v1.";
   const EMOJIS = [
     "😀", "😎", "🤓", "🥳", "🤠", "👻", "🤖", "👽",
     "🐸", "🐱", "🐶", "🦊", "🐼", "🐙", "🦄", "🐲",
@@ -15,7 +16,6 @@
     close: document.getElementById("closeProfile"),
     signedOut: document.getElementById("profileSignedOut"),
     anonymous: document.getElementById("profileAnonymousSignIn"),
-    dev: document.getElementById("profileDevSignIn"),
     lead: document.getElementById("profileLead"),
     authStatus: document.getElementById("profileAuthStatus"),
     form: document.getElementById("profileForm"),
@@ -23,7 +23,6 @@
     name: document.getElementById("profileNameInput"),
     emojis: document.getElementById("profileEmojiGrid"),
     saveStatus: document.getElementById("profileSaveStatus"),
-    signOut: document.getElementById("profileSignOut"),
     menu: document.getElementById("menuProfile"),
     menuEmoji: document.getElementById("menuProfileEmoji"),
     menuName: document.getElementById("menuProfileName")
@@ -65,6 +64,29 @@
     return { uid, email: `${uid}@local.outmaze` };
   }
 
+  function cachedProfile() {
+    if (!state.user) return null;
+    try {
+      const profile = JSON.parse(localStorage.getItem(`${PROFILE_CACHE_PREFIX}${state.user.uid}`) || "null");
+      if (!profile?.name || !EMOJIS.includes(profile.emoji)) return null;
+      return { uid: state.user.uid, name: String(profile.name), emoji: profile.emoji };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function rememberProfile(profile) {
+    if (!state.user || !profile) return;
+    try {
+      localStorage.setItem(
+        `${PROFILE_CACHE_PREFIX}${state.user.uid}`,
+        JSON.stringify({ name: profile.name, emoji: profile.emoji })
+      );
+    } catch (_) {
+      // The server remains the source of truth when browser storage is unavailable.
+    }
+  }
+
   function renderEmojiGrid() {
     if (!elements.emojis) return;
     elements.emojis.innerHTML = "";
@@ -93,22 +115,17 @@
     const signedIn = Boolean(state.user);
     elements.signedOut?.classList.toggle("hidden", signedIn);
     elements.form?.classList.toggle("hidden", !signedIn);
-    elements.dev?.classList.toggle("hidden", !isLocal);
     elements.anonymous?.classList.toggle("hidden", isLocal || signedIn || !state.initialized);
     if (elements.lead) {
-      elements.lead.textContent = isLocal
-        ? "Local testing uses a separate test identity. The published game saves its profile automatically in each browser."
-        : "This browser keeps one name and emoji attached to friend rooms, parties, and Daily scores.";
+      elements.lead.textContent = "This browser remembers one name and emoji for friend rooms, parties, and Daily leaderboards.";
     }
-    elements.signOut?.classList.toggle("hidden", !isLocal);
     if (signedIn) {
       if (elements.account) {
-        elements.account.textContent = isLocal
-          ? "Local test identity · separate from the published game"
-          : "Saved automatically in this browser · clearing site data removes access";
+        elements.account.textContent = "Saved automatically in this browser · clearing site data removes access";
       }
-      if (elements.name && document.activeElement !== elements.name) elements.name.value = state.profile?.name || "";
-      state.selectedEmoji = state.profile?.emoji || state.selectedEmoji || EMOJIS[0];
+      const displayedProfile = state.profile || cachedProfile();
+      if (elements.name && document.activeElement !== elements.name) elements.name.value = displayedProfile?.name || "";
+      state.selectedEmoji = displayedProfile?.emoji || state.selectedEmoji || EMOJIS[0];
       renderEmojiSelection();
     }
     if (elements.menuEmoji) elements.menuEmoji.textContent = state.profile?.emoji || "👤";
@@ -150,6 +167,17 @@
     try {
       const result = await api("/api/profile");
       state.profile = result.profile || null;
+      if (!state.profile) {
+        const remembered = cachedProfile();
+        if (remembered) {
+          const restored = await api("/api/profile", {
+            method: "POST",
+            body: JSON.stringify({ name: remembered.name, emoji: remembered.emoji })
+          });
+          state.profile = restored.profile || null;
+        }
+      }
+      rememberProfile(state.profile);
     } catch (error) {
       if (error.code !== "profile-required" && error.status !== 404) {
         setStatus(elements.saveStatus, error.message, true);
@@ -185,14 +213,6 @@
     return new Promise((resolve) => state.pendingProfileRequests.push(resolve));
   }
 
-  async function signInLocal() {
-    state.user = localUser();
-    setStatus(elements.authStatus, "Opening local test profile…");
-    await loadProfile();
-    setStatus(elements.authStatus, "");
-    if (!state.profile) setTimeout(() => elements.name?.focus(), 0);
-  }
-
   async function saveProfile(event) {
     event.preventDefault();
     setStatus(elements.saveStatus, "Saving profile…");
@@ -202,6 +222,7 @@
         body: JSON.stringify({ name: elements.name?.value || "", emoji: state.selectedEmoji })
       });
       state.profile = result.profile;
+      rememberProfile(state.profile);
       render();
       setStatus(elements.saveStatus, "Profile saved.");
       window.dispatchEvent(new CustomEvent("outmaze-profile-changed", { detail: state.profile }));
@@ -212,20 +233,14 @@
     }
   }
 
-  async function leaveLocalProfile() {
-    if (!isLocal) return;
-    state.user = null;
-    state.profile = null;
-    setStatus(elements.authStatus, "");
-    setStatus(elements.saveStatus, "");
-    render();
-    window.dispatchEvent(new CustomEvent("outmaze-profile-changed", { detail: null }));
-  }
-
   async function initialize() {
     renderEmojiGrid();
     if (isLocal) {
+      state.user = localUser();
+      setStatus(elements.authStatus, "Preparing your browser profile…");
+      await loadProfile();
       state.initialized = true;
+      setStatus(elements.authStatus, "");
       render();
       return;
     }
@@ -273,9 +288,7 @@
   elements.menu?.addEventListener("click", open);
   elements.close?.addEventListener("click", () => close());
   elements.anonymous?.addEventListener("click", () => location.reload());
-  elements.dev?.addEventListener("click", () => signInLocal().catch((error) => setStatus(elements.authStatus, error.message, true)));
   elements.form?.addEventListener("submit", saveProfile);
-  elements.signOut?.addEventListener("click", leaveLocalProfile);
   elements.overlay?.addEventListener("mousedown", (event) => {
     if (event.target === elements.overlay) close();
   });

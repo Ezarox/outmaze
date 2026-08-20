@@ -5,3 +5,4 @@ ai-models/*.json
 *.lines
 diagnostics.txt
 utf-run.ps1
+.outmaze-local-data.json

@@ -526,11 +526,12 @@ function updateStartRaceControl() {
 
 function setCanvasPresentation(mode) {
   const raceMode = mode === "race" || mode === "solo-race";
+  const dualRaceMode = mode === "race";
   const width = mode === "race" ? CANVAS_WIDTH : VIEW_RENDER_WIDTH;
   if (canvas.width !== width) canvas.width = width;
   if (canvas.height !== CANVAS_HEIGHT) canvas.height = CANVAS_HEIGHT;
-  canvasWrapper?.classList.toggle("build-view", !raceMode);
-  canvasWrapper?.classList.toggle("race-view", raceMode);
+  canvasWrapper?.classList.toggle("build-view", !dualRaceMode);
+  canvasWrapper?.classList.toggle("race-view", dualRaceMode);
   document.body.classList.toggle("race-active", raceMode);
   resourceToolbar?.classList.toggle("hidden", raceMode || state.mode !== "game");
   canvas.setAttribute(
@@ -836,9 +837,12 @@ const state = {
     rounds: 3,
     buildEndsAt: null,
     locked: false,
+    preparing: false,
     submitted: false,
     members: [],
-    results: null
+    results: null,
+    liveScores: null,
+    nextRoundAt: null
   },
   daily: {
     active: false,
@@ -1040,7 +1044,11 @@ function startGame(seedText) {
   state.floatingTexts = [];
   state.race = null;
   state.reveal = null;
-  state.results = { player: null, ai: null, winner: null };
+  state.results = {
+    player: null,
+    ai: state.daily.active ? Number(state.daily.challenge?.aiTime || 0) : null,
+    winner: null
+  };
   state.waitingForSpecial = false;
   setBuildMode("normal");
   updateSpecialInfo();
@@ -1467,7 +1475,11 @@ function editAndRetry() {
   state.race = null;
   state.reveal = null;
   revealBanner?.classList.add("hidden");
-  state.results = { player: null, ai: null, winner: null };
+  state.results = {
+    player: null,
+    ai: state.daily.active ? Number(state.daily.challenge?.aiTime || 0) : null,
+    winner: null
+  };
   resetPadStates(state.playerGrid);
   resetPadStates(state.aiGrid);
   if (state.playerSpecial) state.playerSpecial.effectTimer = 0;
@@ -1888,6 +1900,7 @@ async function startRace(forceStart = false) {
     if (revealTitle) revealTitle.textContent = "Releasing your runner";
     revealBanner?.classList.remove("hidden");
     updatePhaseLabel("Daily run", "Your runner is the only maze revealed; the AI benchmark remains a time only.");
+    window.OutmazeOnline?.updateDailyPanel?.();
     announce("Daily runner ready. The attempt begins shortly.");
     return;
   }
@@ -3501,6 +3514,7 @@ function updateRace(delta) {
 async function finishDailyAttempt() {
   if (!state.daily.active || state.daily.submitting) return;
   state.daily.submitting = true;
+  window.OutmazeOnline?.updateDailyPanel?.();
   updatePhaseLabel("Verifying Daily time", "Checking this maze with the shared server rules.");
   try {
     const result = await window.OutmazeOnline?.completeDailyAttempt?.({
@@ -3718,7 +3732,7 @@ function formatScoreText() {
   if (state.party.active) {
     const uid = window.OutmazeAccount?.profile?.uid;
     const self = state.party.members.find((member) => member.uid === uid);
-    const score = Number(self?.score || 0);
+    const score = Number(state.party.liveScores?.[uid] ?? self?.score ?? 0);
     return `Placement points: ${score.toFixed(score % 1 ? 1 : 0)}`;
   }
   const finished = !!(state.race && state.race.finished);
@@ -3750,6 +3764,7 @@ function formatLabelScore(label) {
 
 
 function draw() {
+  if (state.party.active && state.party.phase === "results") return;
   ctx.fillStyle = "#050505";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   const views = getViewsForRender();
@@ -3813,7 +3828,7 @@ function getViewsForRender() {
   ];
 }
 
-function drawView(view, offsetX) {
+function drawView(view, offsetX, options = {}) {
   ctx.save();
   ctx.translate(offsetX != null ? offsetX : view.offset || 0, 0);
   ctx.fillStyle = "#0b0b0b";
@@ -3857,18 +3872,62 @@ function drawView(view, offsetX) {
     ctx.textAlign = "left";
   }
 
-  if (!state.building && view.label.startsWith("AI")) {
+  if (!options.hideLabel && !state.building && view.label.startsWith("AI")) {
     ctx.fillStyle = "rgba(0, 0, 0, 0.25)";
     ctx.fillRect(0, 0, VIEW_RENDER_WIDTH, VIEW_HEIGHT);
   }
 
-  ctx.fillStyle = "#ffffff";
-  ctx.font = "16px system-ui";
-  ctx.textBaseline = "top";
-  ctx.fillText(`${view.label}${formatLabelScore(view.label)}`, VIEW_BORDER + 10, 8);
+  if (!options.hideLabel) {
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "16px system-ui";
+    ctx.textBaseline = "top";
+    ctx.fillText(`${view.label}${formatLabelScore(view.label)}`, VIEW_BORDER + 10, 8);
+  }
 
   ctx.restore();
 }
+
+let renderingCompactPreview = false;
+
+function renderMazePreview(targetContext, view) {
+  if (!targetContext?.canvas || !view?.grid) return;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, VIEW_RENDER_WIDTH, VIEW_HEIGHT);
+  renderingCompactPreview = true;
+  try {
+    drawView({
+      label: "",
+      grid: view.grid,
+      special: view.special,
+      runner: view.runner || null,
+      neutralSpecials: view.neutralSpecials || []
+    }, 0, { hideLabel: true });
+  } finally {
+    renderingCompactPreview = false;
+  }
+  ctx.restore();
+
+  targetContext.save();
+  targetContext.setTransform(1, 0, 0, 1, 0, 0);
+  targetContext.clearRect(0, 0, targetContext.canvas.width, targetContext.canvas.height);
+  targetContext.imageSmoothingEnabled = true;
+  targetContext.imageSmoothingQuality = "high";
+  targetContext.drawImage(
+    canvas,
+    0,
+    0,
+    VIEW_RENDER_WIDTH,
+    VIEW_HEIGHT,
+    0,
+    0,
+    targetContext.canvas.width,
+    targetContext.canvas.height
+  );
+  targetContext.restore();
+}
+
+window.OutmazeRendering = Object.freeze({ renderMazePreview });
 
 function drawSpecialOverlay(special) {
   ctx.save();
@@ -5084,6 +5143,13 @@ function drawSingleBlockSprite(gridX, gridY, context = ctx, offsetY = GRID_OFFSE
 }
 
 function drawFlatResourceTile(baseX, baseY, palette, context = ctx) {
+  if (renderingCompactPreview) {
+    context.save();
+    context.fillStyle = palette.fill;
+    context.fillRect(baseX, baseY, CELL_SIZE, CELL_SIZE);
+    context.restore();
+    return;
+  }
   const edge = 1.5;
   const size = CELL_SIZE - edge * 2;
   context.save();
@@ -5287,6 +5353,7 @@ function drawBeveledTile(baseX, baseY, palette, context = ctx) {
   context.fillStyle = palette.outer;
   context.fill();
   context.lineWidth = 2;
+  context.setLineDash([]);
   context.strokeStyle = palette.border || "#050505";
   context.stroke();
 
@@ -5303,10 +5370,12 @@ function drawBeveledTile(baseX, baseY, palette, context = ctx) {
   context.fillStyle = palette.inner || "#3a3a3a";
   context.fill();
 
-  context.strokeStyle = palette.highlight || "rgba(255,255,255,0.1)";
-  context.lineWidth = 1;
-  context.setLineDash([2, 3]);
-  context.stroke();
+  if (!renderingCompactPreview) {
+    context.strokeStyle = palette.highlight || "rgba(255,255,255,0.1)";
+    context.lineWidth = 1;
+    context.setLineDash([2, 3]);
+    context.stroke();
+  }
 }
 
 // SPECIALS -----------------------------------------------------------------

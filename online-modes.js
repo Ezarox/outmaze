@@ -16,30 +16,42 @@
     partyRoomInput: document.getElementById("partyRoomInput"),
     partyJoin: document.getElementById("partyJoin"),
     partyMatchActions: document.getElementById("partyMatchActions"),
+    partyAiControl: document.getElementById("partyAiControl"),
+    partyAiCount: document.getElementById("partyAiCount"),
+    partyAddAi: document.getElementById("partyAddAi"),
+    partyRemoveAi: document.getElementById("partyRemoveAi"),
     partyReady: document.getElementById("partyReady"),
     partyStart: document.getElementById("partyStart"),
     partyEarlyStart: document.getElementById("partyEarlyStart"),
     partyNext: document.getElementById("partyNext"),
-    partySkip: document.getElementById("partySkip"),
+    partyCountdown: document.getElementById("partyCountdown"),
     partyProgress: document.getElementById("partyProgress"),
     partyRoundLabel: document.getElementById("partyRoundLabel"),
     partyProgressFill: document.getElementById("partyProgressFill"),
     partyRoster: document.getElementById("partyRoster"),
     partyLeave: document.getElementById("partyLeave"),
     partyGallery: document.getElementById("partyGallery"),
+    partyPodium: document.getElementById("partyPodium"),
+    partyPodiumPlaces: document.getElementById("partyPodiumPlaces"),
+    closePartyPodium: document.getElementById("closePartyPodium"),
     dailyPanel: document.getElementById("dailyPanel"),
     dailyTitle: document.getElementById("dailyTitle"),
     dailyDate: document.getElementById("dailyDate"),
+    dailyPrevious: document.getElementById("dailyPrevious"),
+    dailyNext: document.getElementById("dailyNext"),
+    dailyToday: document.getElementById("dailyToday"),
     dailyAiTime: document.getElementById("dailyAiTime"),
     dailyBest: document.getElementById("dailyBest"),
     dailyAttempts: document.getElementById("dailyAttempts"),
     dailyStatus: document.getElementById("dailyStatus"),
     dailyActions: document.getElementById("dailyActions"),
+    dailyCancel: document.getElementById("dailyCancel"),
     dailyModify: document.getElementById("dailyModify"),
     dailyBack: document.getElementById("dailyBack"),
     dailyLeaderboard: document.getElementById("dailyLeaderboard")
   };
   let partyAnimation = null;
+  let partyCountdownTimer = null;
 
   for (let rounds = 1; rounds <= 10; rounds++) {
     const option = document.createElement("option");
@@ -57,38 +69,172 @@
     return value != null && value !== "" && Number.isFinite(Number(value)) ? `${Number(value).toFixed(2)}s` : "--";
   }
 
+  function formatPoints(value) {
+    const points = Number(value || 0);
+    return points.toFixed(points % 1 ? 1 : 0);
+  }
+
+  function formatPointLabel(value) {
+    const points = Number(value || 0);
+    return `${formatPoints(points)} ${points === 1 ? "pt" : "pts"}`;
+  }
+
   function setPartyStatus(text, error = false) {
     if (!elements.partyStatus) return;
     elements.partyStatus.textContent = text;
     elements.partyStatus.classList.toggle("is-error", Boolean(error));
   }
 
+  function clearPartyCountdown() {
+    if (partyCountdownTimer) clearInterval(partyCountdownTimer);
+    partyCountdownTimer = null;
+    elements.partyCountdown?.classList.add("hidden");
+  }
+
+  function updatePartyCountdown() {
+    const finalRound = state.party.round >= state.party.rounds;
+    const visible = state.party.phase === "results" && !finalRound && Boolean(partyAnimation?.complete) && Boolean(state.party.nextRoundAt);
+    elements.partyCountdown?.classList.toggle("hidden", !visible);
+    if (!visible || !elements.partyCountdown) return;
+    const remaining = Math.max(0, Math.ceil((Number(state.party.nextRoundAt) - Date.now()) / 1000));
+    elements.partyCountdown.textContent = remaining > 0 ? `Next round in ${remaining}s` : "Starting next round…";
+  }
+
+  function startPartyCountdown() {
+    clearPartyCountdown();
+    updatePartyCountdown();
+    partyCountdownTimer = setInterval(updatePartyCountdown, 250);
+  }
+
   function partySelf() {
     return state.party.members.find((member) => member.uid === profileUid()) || null;
   }
 
+  function renderPartyStandings() {
+    if (!elements.partyRoster || !partyAnimation) return;
+    elements.partyRoster.innerHTML = "";
+    elements.partyRoster.classList.remove("is-build-summary");
+    elements.partyRoster.classList.add("is-standings");
+    elements.partyRoster.setAttribute("aria-label", "Live party standings");
+
+    const heading = document.createElement("div");
+    heading.className = "party-standing party-standing--heading";
+    heading.innerHTML = "<span>Player</span><span>Time this round</span><span>Placement this round</span><span>Total score</span><span>Overall time</span>";
+    elements.partyRoster.appendChild(heading);
+
+    const rows = partyAnimation.items
+      .map((item) => {
+        const previousTotal = Number(item.entry.totalPoints || 0) - Number(item.entry.points || 0);
+        const previousTime = Number(item.entry.totalTime || 0) - Number(item.entry.time || 0);
+        return {
+          item,
+          displayedTotal: item.finished ? Number(item.entry.totalPoints || 0) : previousTotal,
+          displayedTime: item.finished ? Number(item.entry.totalTime || 0) : previousTime
+        };
+      })
+      .sort((a, b) =>
+        b.displayedTotal - a.displayedTotal ||
+        b.displayedTime - a.displayedTime ||
+        Number(a.item.entry.slot || 999) - Number(b.item.entry.slot || 999)
+      );
+
+    rows.forEach(({ item, displayedTotal, displayedTime }) => {
+      const entry = item.entry;
+      const row = document.createElement("div");
+      row.className = "party-standing";
+      row.classList.toggle("is-self", entry.uid === profileUid());
+      row.classList.toggle("is-finished", item.finished);
+      row.innerHTML = `
+        <span class="party-standing__player"><i aria-hidden="true"></i><strong></strong></span>
+        <span class="party-standing__time"></span>
+        <span class="party-standing__placement"></span>
+        <span class="party-standing__total"></span>
+        <span class="party-standing__overall"></span>`;
+      row.querySelector("i").textContent = entry.profile.emoji;
+      row.querySelector("strong").textContent = `${entry.profile.name}${entry.uid === profileUid() ? " · You" : ""}`;
+      row.querySelector(".party-standing__time").textContent = item.finished ? formatTime(entry.time) : "Running…";
+      row.querySelector(".party-standing__placement").textContent = item.finished
+        ? `#${entry.rank} · +${formatPointLabel(entry.points)}`
+        : "—";
+      row.querySelector(".party-standing__total").textContent = formatPointLabel(displayedTotal);
+      row.querySelector(".party-standing__overall").textContent = formatTime(displayedTime);
+      elements.partyRoster.appendChild(row);
+    });
+  }
+
   function renderPartyRoster() {
     if (!elements.partyRoster) return;
+    if (!state.party.room) {
+      elements.partyRoster.innerHTML = "";
+      elements.partyRoster.classList.remove("is-standings", "is-build-summary");
+      elements.partyRoster.setAttribute("aria-label", "Party players");
+      return;
+    }
+    if (state.party.phase === "results" && partyAnimation) {
+      renderPartyStandings();
+      return;
+    }
+    if (state.party.phase === "building") {
+      elements.partyRoster.innerHTML = "";
+      elements.partyRoster.classList.remove("is-standings");
+      elements.partyRoster.classList.add("is-build-summary");
+      elements.partyRoster.setAttribute("aria-label", "Party build status");
+      state.party.members.forEach((member) => {
+        const item = document.createElement("div");
+        item.className = "party-build-member";
+        const status = member.bot
+          ? "Ready"
+          : state.party.locked || (member.uid === profileUid() && state.party.submitted)
+            ? "Locked"
+            : member.early ? "Early ready" : "Building";
+        item.classList.toggle("is-ready", status !== "Building");
+        item.innerHTML = `
+          <span class="party-build-member__emoji" aria-hidden="true"></span>
+          <strong></strong>
+          <small></small>
+          <b></b>`;
+        item.querySelector(".party-build-member__emoji").textContent = member.emoji;
+        item.querySelector("strong").textContent = member.name;
+        item.querySelector("small").textContent = status;
+        item.querySelector("b").textContent = `${formatPointLabel(member.score)} · ${formatTime(member.totalTime)}`;
+        elements.partyRoster.appendChild(item);
+      });
+      return;
+    }
     elements.partyRoster.innerHTML = "";
+    elements.partyRoster.classList.remove("is-build-summary");
+    elements.partyRoster.classList.add("is-standings");
+    elements.partyRoster.setAttribute("aria-label", "Party scoreboard");
+    const heading = document.createElement("div");
+    heading.className = "party-standing party-standing--heading";
+    heading.innerHTML = "<span>Player</span><span>Time this round</span><span>Placement this round</span><span>Total score</span><span>Overall time</span>";
+    elements.partyRoster.appendChild(heading);
     state.party.members.forEach((member) => {
-      const card = document.createElement("div");
-      card.className = "party-member";
-      card.classList.toggle("is-ready", Boolean(member.ready));
-      card.classList.toggle("is-early", Boolean(member.early));
-      const status = state.party.phase === "lobby"
+      const row = document.createElement("div");
+      row.className = "party-standing";
+      row.classList.toggle("is-self", member.uid === profileUid());
+      row.innerHTML = `
+        <span class="party-standing__player"><i aria-hidden="true"></i><strong></strong></span>
+        <span class="party-standing__time"></span>
+        <span class="party-standing__placement"></span>
+        <span class="party-standing__total"></span>
+        <span class="party-standing__overall"></span>`;
+      row.querySelector("i").textContent = member.emoji;
+      row.querySelector("strong").textContent = `${member.name}${member.bot ? " · AI" : ""}${member.host ? " · Host" : ""}${member.uid === profileUid() ? " · You" : ""}`;
+      const buildingStatus = member.bot
+        ? "Maze ready"
+        : state.party.locked || (member.uid === profileUid() && state.party.submitted)
+          ? "Maze locked"
+          : member.early
+            ? "Ready to start"
+            : "Building…";
+      row.querySelector(".party-standing__time").textContent = state.party.phase === "building" ? buildingStatus : "—";
+      row.querySelector(".party-standing__placement").textContent = state.party.phase === "lobby"
         ? member.ready ? "Ready" : "Not ready"
-        : state.party.phase === "building"
-          ? member.early ? "Ready to start" : "Building"
-          : member.host ? "Host" : "Party player";
-      card.innerHTML = `
-        <span class="party-member__emoji" aria-hidden="true"></span>
-        <span class="party-member__copy"><strong></strong><small></small></span>
-        <span class="party-member__score"></span>`;
-      card.querySelector(".party-member__emoji").textContent = member.emoji;
-      card.querySelector("strong").textContent = `${member.name}${member.host ? " · Host" : ""}${member.uid === profileUid() ? " · You" : ""}`;
-      card.querySelector("small").textContent = status;
-      card.querySelector(".party-member__score").textContent = `${Number(member.score || 0).toFixed(Number(member.score || 0) % 1 ? 1 : 0)} pts`;
-      elements.partyRoster.appendChild(card);
+        : "—";
+      row.querySelector(".party-standing__total").textContent = formatPointLabel(member.score);
+      row.querySelector(".party-standing__overall").textContent = formatTime(member.totalTime);
+      elements.partyRoster.appendChild(row);
     });
   }
 
@@ -99,6 +245,7 @@
     const results = inRoom && state.party.phase === "results";
     const self = partySelf();
     const host = Boolean(self?.host);
+    const botCount = state.party.members.filter((member) => member.bot).length;
     const everyoneReady = state.party.members.length >= 2 && state.party.members.every((member) => member.ready);
 
     elements.partyPanel?.classList.toggle("hidden", !state.party.active);
@@ -114,22 +261,31 @@
     }
     elements.partyReady?.classList.toggle("hidden", !lobby);
     if (elements.partyReady) {
+      elements.partyReady.disabled = state.party.preparing;
       elements.partyReady.textContent = self?.ready ? "Ready" : "Ready up";
       elements.partyReady.classList.toggle("is-selected", Boolean(self?.ready));
       elements.partyReady.setAttribute("aria-pressed", String(Boolean(self?.ready)));
     }
+    elements.partyAiControl?.classList.toggle("hidden", !lobby || !host);
+    if (elements.partyAiCount) elements.partyAiCount.textContent = String(botCount);
+    if (elements.partyAddAi) {
+      elements.partyAddAi.disabled = state.party.preparing || state.party.members.length >= 8;
+    }
+    if (elements.partyRemoveAi) {
+      elements.partyRemoveAi.disabled = state.party.preparing || botCount === 0;
+    }
     elements.partyStart?.classList.toggle("hidden", !lobby || !host);
-    if (elements.partyStart) elements.partyStart.disabled = !everyoneReady;
+    if (elements.partyStart) elements.partyStart.disabled = !everyoneReady || state.party.preparing;
     elements.partyEarlyStart?.classList.toggle("hidden", !building || state.party.locked);
     if (elements.partyEarlyStart) {
       elements.partyEarlyStart.textContent = self?.early ? "Keep building" : "Ready to start early";
       elements.partyEarlyStart.classList.toggle("is-selected", Boolean(self?.early));
       elements.partyEarlyStart.setAttribute("aria-pressed", String(Boolean(self?.early)));
     }
-    elements.partyNext?.classList.toggle("hidden", !results || !host);
-    elements.partySkip?.classList.toggle("hidden", !results || !partyAnimation || partyAnimation.complete);
     const finalRound = state.party.round >= state.party.rounds;
-    if (elements.partyNext) elements.partyNext.textContent = finalRound ? "Play another match" : "Next round";
+    elements.partyNext?.classList.toggle("hidden", !results || !host || !finalRound);
+    if (elements.partyNext) elements.partyNext.disabled = Boolean(results && partyAnimation && !partyAnimation.complete);
+    if (elements.partyNext) elements.partyNext.textContent = "Play another match";
     elements.partyProgress?.classList.toggle("hidden", !inRoom || lobby);
     if (elements.partyRoundLabel) elements.partyRoundLabel.textContent = `Round ${Math.max(1, state.party.round)} of ${state.party.rounds}`;
     if (elements.partyProgressFill) {
@@ -138,6 +294,8 @@
     if (elements.partyTitle) {
       elements.partyTitle.textContent = !inRoom
         ? "Create or join a party"
+        : state.party.preparing
+          ? "AI players are building"
         : lobby
           ? state.party.members.length < 2 ? "Waiting for more players" : "Party lobby"
           : building
@@ -163,9 +321,13 @@
     state.party.rounds = Number(elements.partyRounds?.value || 3);
     state.party.buildEndsAt = null;
     state.party.locked = false;
+    state.party.preparing = false;
     state.party.submitted = false;
     state.party.members = [];
     state.party.results = null;
+    state.party.liveScores = null;
+    state.party.nextRoundAt = null;
+    clearPartyCountdown();
   }
 
   async function startPartyFromMenu() {
@@ -213,12 +375,16 @@
     state.party.round = Number(event.round || 0);
     state.party.rounds = Number(event.rounds || state.party.rounds || 3);
     state.party.locked = Boolean(event.locked);
+    state.party.preparing = Boolean(event.preparing);
     state.party.members = Array.isArray(event.members) ? event.members : state.party.members;
+    state.party.nextRoundAt = event.nextRoundAt ?? state.party.nextRoundAt;
     renderParty();
   }
 
   function startPartyBuild(event) {
     stopPartyAnimation();
+    clearPartyCountdown();
+    hidePartyPodium();
     state.party.active = true;
     state.party.room = event.room;
     state.party.phase = "building";
@@ -227,8 +393,11 @@
     state.party.rounds = event.rounds;
     state.party.buildEndsAt = event.buildEndsAt;
     state.party.locked = false;
+    state.party.preparing = false;
     state.party.submitted = false;
     state.party.results = null;
+    state.party.liveScores = null;
+    state.party.nextRoundAt = null;
     state.vs.active = false;
     document.body.classList.add("party-mode");
     document.body.classList.remove("party-racing");
@@ -259,81 +428,68 @@
     renderParty();
   }
 
-  function miniCellColor(cell) {
-    const cells = AICore.cells;
-    if (cell === cells.STATIC) return "#263a33";
-    if (cell === cells.PLAYER) return "#3fe49a";
-    if (cell === cells.SINGLE) return "#85b5a4";
-    if (cell === cells.SPECIAL) return "#cf9cff";
-    if (cell === cells.STATIC_SPECIAL) return "#7c658c";
-    if (cell === cells.SPEED || cell === cells.SPEED_USED) return "#cf5d66";
-    if (cell === cells.SLOW || cell === cells.SLOW_USED) return "#5d82cf";
-    if (cell === cells.DETOUR || cell === cells.DETOUR_USED) return "#d5804b";
-    if (cell === cells.STONE || cell === cells.STONE_USED) return "#caa755";
-    if (cell === cells.REWIND || cell === cells.REWIND_USED) return "#d85c91";
-    return "transparent";
+  function sizeMiniMaze(item) {
+    const renderSize = 690;
+    if (item.canvas.width !== renderSize || item.canvas.height !== renderSize) {
+      item.canvas.width = renderSize;
+      item.canvas.height = renderSize;
+      item.context = item.canvas.getContext("2d");
+    }
+    item.previewSized = true;
   }
 
   function drawMiniMaze(item) {
-    const canvas = item.canvas;
-    const context = item.context;
-    const size = 12;
-    const pad = 16;
-    const board = size * 21;
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    context.fillStyle = "#050807";
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.save();
-    context.translate(pad, pad);
-    context.fillStyle = "#080d0b";
-    context.fillRect(0, 0, board, board);
-    if (item.special?.placed && item.special.cell) {
-      const cx = (item.special.cell.x + 0.5) * size;
-      const cy = (item.special.cell.y + 0.5) * size;
-      context.fillStyle = "rgba(207,156,255,.09)";
-      if (item.special.type === "row") context.fillRect(0, cy - size * 0.3, board, size * 0.6);
-      else if (item.special.type === "column") context.fillRect(cx - size * 0.3, 0, size * 0.6, board);
-      else {
-        context.beginPath();
-        context.arc(cx, cy, size * (item.special.type === "gravity" ? 5 : 3.5), 0, Math.PI * 2);
-        context.fill();
-      }
-    }
-    for (let y = 0; y < 21; y++) {
-      for (let x = 0; x < 21; x++) {
-        const cell = item.runner.grid[y][x];
-        if (cell === AICore.cells.EMPTY) continue;
-        context.fillStyle = miniCellColor(cell);
-        context.fillRect(x * size + 1, y * size + 1, size - 2, size - 2);
-      }
-    }
-    context.strokeStyle = "rgba(255,255,255,.055)";
-    context.lineWidth = 1;
-    for (let line = 0; line <= 21; line++) {
-      context.beginPath();
-      context.moveTo(0, line * size);
-      context.lineTo(board, line * size);
-      context.stroke();
-      context.beginPath();
-      context.moveTo(line * size, 0);
-      context.lineTo(line * size, board);
-      context.stroke();
-    }
-    if (item.runner.worldPos) {
-      context.fillStyle = "#ffd35a";
-      context.shadowColor = "rgba(255,211,90,.7)";
-      context.shadowBlur = 8;
-      context.beginPath();
-      context.arc(item.runner.worldPos.x * size, item.runner.worldPos.y * size, 3.8, 0, Math.PI * 2);
-      context.fill();
-    }
-    context.restore();
+    if (!item.previewSized) sizeMiniMaze(item);
+    window.OutmazeRendering?.renderMazePreview?.(item.context, {
+      grid: item.runner.grid,
+      special: item.runner.special,
+      runner: item.runner,
+      neutralSpecials: item.runner.neutralSpecials
+    });
   }
 
   function finishPartyItem(item) {
+    if (item.finished) return;
     item.finished = true;
+    item.card.classList.remove("is-running");
     item.card.classList.add("is-finished");
-    item.result.textContent = `#${item.entry.rank} · ${formatTime(item.entry.time)} · +${item.entry.points} pts`;
+    item.result.textContent = formatTime(item.entry.time);
+    state.party.liveScores[item.entry.uid] = Number(item.entry.totalPoints || 0);
+    updateHud();
+    renderPartyRoster();
+  }
+
+  function hidePartyPodium() {
+    elements.partyPodium?.classList.add("hidden");
+  }
+
+  function showPartyPodium() {
+    if (!elements.partyPodium || !elements.partyPodiumPlaces || !partyAnimation) return;
+    const medals = ["🥇", "🥈", "🥉"];
+    const places = partyAnimation.items
+      .slice()
+      .sort((a, b) =>
+        Number(b.entry.totalPoints || 0) - Number(a.entry.totalPoints || 0) ||
+        Number(b.entry.totalTime || 0) - Number(a.entry.totalTime || 0) ||
+        Number(a.entry.slot || 999) - Number(b.entry.slot || 999)
+      )
+      .slice(0, 3);
+    elements.partyPodiumPlaces.innerHTML = "";
+    places.forEach((item, index) => {
+      const row = document.createElement("div");
+      row.className = `party-podium-place party-podium-place--${index + 1}`;
+      row.innerHTML = `
+        <span class="party-podium-place__medal" aria-hidden="true"></span>
+        <span class="party-podium-place__emoji" aria-hidden="true"></span>
+        <strong></strong>
+        <b></b>`;
+      row.querySelector(".party-podium-place__medal").textContent = medals[index];
+      row.querySelector(".party-podium-place__emoji").textContent = item.entry.profile.emoji;
+      row.querySelector("strong").textContent = item.entry.profile.name;
+      row.querySelector("b").textContent = `${formatPointLabel(item.entry.totalPoints)} · ${formatTime(item.entry.totalTime)}`;
+      elements.partyPodiumPlaces.appendChild(row);
+    });
+    elements.partyPodium.classList.remove("hidden");
   }
 
   function partyAnimationFrame(timestamp) {
@@ -348,11 +504,16 @@
       });
       partyAnimation.accumulator -= AICore.constants.FIXED_TIMESTEP;
     }
-    partyAnimation.items.forEach(drawMiniMaze);
     partyAnimation.complete = partyAnimation.items.every((item) => item.finished);
+    if (partyAnimation.complete || timestamp - partyAnimation.lastDraw >= 1000 / 30) {
+      partyAnimation.items.forEach(drawMiniMaze);
+      partyAnimation.lastDraw = timestamp;
+    }
     if (partyAnimation.complete) {
-      setPartyStatus(state.party.round >= state.party.rounds ? "Match complete. Final placement points are locked." : "Round complete. The host can begin the next seed.");
+      setPartyStatus(state.party.round >= state.party.rounds ? "Match complete. Final placement points are locked." : "Round complete. The next seed starts automatically.");
+      startPartyCountdown();
       renderParty();
+      if (state.party.round >= state.party.rounds) showPartyPodium();
       return;
     }
     partyAnimation.frame = requestAnimationFrame(partyAnimationFrame);
@@ -363,32 +524,33 @@
     partyAnimation = null;
   }
 
-  function skipPartyRace() {
-    if (!partyAnimation) return;
-    partyAnimation.items.forEach((item) => {
-      if (!item.finished) finishPartyItem(item);
-      drawMiniMaze(item);
-    });
-    partyAnimation.complete = true;
-    setPartyStatus(state.party.round >= state.party.rounds ? "Match complete. Final placement points are locked." : "Round complete. The host can begin the next seed.");
-    renderParty();
-  }
-
   function startPartyResults(event) {
     stopPartyAnimation();
+    clearPartyCountdown();
+    hidePartyPodium();
     state.party.phase = "results";
     state.party.results = event;
     state.party.round = event.round;
     state.party.rounds = event.rounds;
+    state.party.nextRoundAt = Number(event.nextRoundAt || 0) || null;
     state.building = false;
     state.race = null;
     document.body.classList.add("party-racing");
     gameBody?.classList.add("hidden");
     elements.partyGallery?.classList.remove("hidden");
     elements.partyGallery.innerHTML = "";
-    const items = event.entries.map((entry) => {
+    const orderedEntries = event.entries
+      .slice()
+      .sort((a, b) => Number(a.slot || 999) - Number(b.slot || 999));
+    state.party.liveScores = Object.fromEntries(
+      orderedEntries.map((entry) => [
+        entry.uid,
+        Number(entry.totalPoints || 0) - Number(entry.points || 0)
+      ])
+    );
+    const items = orderedEntries.map((entry) => {
       const card = document.createElement("article");
-      card.className = "party-maze-card";
+      card.className = "party-maze-card is-running";
       const header = document.createElement("div");
       header.className = "party-maze-card__header";
       const emoji = document.createElement("span");
@@ -399,8 +561,8 @@
       result.className = "party-maze-card__result";
       result.textContent = "Running…";
       const canvas = document.createElement("canvas");
-      canvas.width = 284;
-      canvas.height = 284;
+      canvas.width = 690;
+      canvas.height = 690;
       header.append(emoji, name, result);
       card.append(header, canvas);
       elements.partyGallery.appendChild(card);
@@ -416,8 +578,17 @@
         finished: false
       };
     });
-    partyAnimation = { items, last: performance.now(), accumulator: 0, complete: false, frame: null };
+    partyAnimation = {
+      items,
+      last: performance.now(),
+      lastDraw: 0,
+      accumulator: 0,
+      complete: false,
+      frame: null
+    };
+    items.forEach(sizeMiniMaze);
     items.forEach(drawMiniMaze);
+    updateHud();
     updatePhaseLabel(`Party round ${event.round} results`, "All mazes are public now. Placement points decide the match.");
     setPartyStatus("Runners released across every submitted maze.");
     renderParty();
@@ -462,6 +633,12 @@
     }
     if (event.type === "party-state") {
       applyPartyState(event);
+      return;
+    }
+    if (event.type === "party-preparing") {
+      state.party.preparing = true;
+      setPartyStatus(event.bots ? `Generating ${event.bots} distinct AI maze${event.bots === 1 ? "" : "s"}…` : "Preparing the next seed…");
+      renderParty();
       return;
     }
     if (event.type === "party-player-joined") {
@@ -519,12 +696,69 @@
   function updateDailyPanel() {
     if (!state.daily.active) return;
     const challenge = state.daily.challenge || {};
-    if (elements.dailyDate) elements.dailyDate.textContent = challenge.day || "----";
+    const isToday = Boolean(challenge.day && challenge.day === challenge.today);
+    if (elements.dailyTitle) elements.dailyTitle.textContent = isToday ? "Today’s shared seed" : "Archived shared seed";
+    if (elements.dailyDate) {
+      elements.dailyDate.value = challenge.day || "";
+      elements.dailyDate.min = challenge.archiveStart || "";
+      elements.dailyDate.max = challenge.today || "";
+      elements.dailyDate.disabled = !challenge.day;
+    }
+    if (elements.dailyPrevious) elements.dailyPrevious.disabled = !challenge.day || challenge.day <= challenge.archiveStart;
+    if (elements.dailyNext) elements.dailyNext.disabled = !challenge.day || challenge.day >= challenge.today;
+    if (elements.dailyToday) elements.dailyToday.disabled = !challenge.today || isToday;
     if (elements.dailyAiTime) elements.dailyAiTime.textContent = formatTime(challenge.aiTime);
     if (elements.dailyBest) elements.dailyBest.textContent = formatTime(challenge.personalBest);
     if (elements.dailyAttempts) elements.dailyAttempts.textContent = String(challenge.attempts || 0);
-    elements.dailyActions?.classList.toggle("hidden", !state.daily.attemptComplete);
+    const canCancel = !state.building && !state.daily.submitting && Boolean(
+      state.reveal?.active || (state.race && !state.race.finished)
+    );
+    elements.dailyActions?.classList.toggle("hidden", !state.daily.attemptComplete && !canCancel);
+    elements.dailyCancel?.classList.toggle("hidden", !canCancel);
+    elements.dailyModify?.classList.toggle("hidden", !state.daily.attemptComplete);
     renderDailyLeaderboard();
+  }
+
+  function shiftDailyDay(day, offset) {
+    const date = new Date(`${day}T00:00:00Z`);
+    date.setUTCDate(date.getUTCDate() + offset);
+    return date.toISOString().slice(0, 10);
+  }
+
+  function applyDailyChallenge(challenge) {
+    state.daily.challenge = challenge;
+    state.daily.submitting = false;
+    state.daily.attemptComplete = false;
+    hideResultPopup();
+    startGame(challenge.seed);
+    state.results.ai = Number(challenge.aiTime);
+    elements.dailyPanel?.classList.remove("hidden");
+    updateDailyPanel();
+    const isToday = challenge.day === challenge.today;
+    updatePhaseLabel(
+      isToday ? "Build today’s maze" : `Build the ${challenge.day} maze`,
+      `The hidden AI benchmark is ${formatTime(challenge.aiTime)}. Unlimited verified attempts are available.`
+    );
+    if (elements.dailyStatus) {
+      elements.dailyStatus.textContent = isToday
+        ? "The AI time is public; its maze remains hidden."
+        : `Historical challenge ${challenge.day}. Its leaderboard remains open for unlimited attempts.`;
+    }
+  }
+
+  async function loadDailyDay(day) {
+    if (!state.daily.active || !day || state.daily.submitting) return;
+    if (day === state.daily.challenge?.day) return;
+    showLoadingOverlay("Loading archived challenge…");
+    try {
+      const challenge = await window.OutmazeAccount.api(`/api/daily?day=${encodeURIComponent(day)}`);
+      applyDailyChallenge(challenge);
+    } catch (error) {
+      if (elements.dailyStatus) elements.dailyStatus.textContent = error.message || "That Daily Challenge could not be loaded.";
+      updateDailyPanel();
+    } finally {
+      hideLoadingOverlay();
+    }
   }
 
   async function startDailyFromMenu() {
@@ -538,18 +772,10 @@
       state.vs.active = false;
       state.party.active = false;
       state.daily.active = true;
-      state.daily.challenge = challenge;
-      state.daily.submitting = false;
-      state.daily.attemptComplete = false;
       document.body.classList.add("daily-mode");
       hideMainMenu();
       elements.dailyPanel?.classList.remove("hidden");
-      startGame(challenge.seed);
-      state.results.ai = Number(challenge.aiTime);
-      elements.dailyPanel?.classList.remove("hidden");
-      updateDailyPanel();
-      updatePhaseLabel("Build today’s maze", `The hidden AI benchmark is ${formatTime(challenge.aiTime)}. Unlimited verified attempts are available.`);
-      if (elements.dailyStatus) elements.dailyStatus.textContent = "The AI time is public; its maze remains hidden.";
+      applyDailyChallenge(challenge);
     } catch (error) {
       window.alert(error.message || "The Daily challenge could not be loaded.");
       showMainMenu();
@@ -563,7 +789,7 @@
     if (elements.dailyStatus) elements.dailyStatus.textContent = "Verifying your maze and runner time…";
     const result = await window.OutmazeAccount.api("/api/daily/submit", {
       method: "POST",
-      body: JSON.stringify(payload)
+      body: JSON.stringify({ ...payload, day: state.daily.challenge?.day })
     });
     state.daily.challenge = {
       ...state.daily.challenge,
@@ -592,10 +818,24 @@
     updateDailyPanel();
   }
 
+  function cancelDailyAttempt() {
+    const canCancel = state.daily.active && !state.building && !state.daily.submitting && Boolean(
+      state.reveal?.active || (state.race && !state.race.finished)
+    );
+    if (!canCancel) return;
+    hideResultPopup();
+    editAndRetry();
+    state.daily.attemptComplete = false;
+    if (elements.dailyStatus) elements.dailyStatus.textContent = "Run cancelled. No time was submitted; your maze is open for editing.";
+    updateDailyPanel();
+  }
+
   function deactivateModes({ closeSocket = false } = {}) {
     const wasParty = state.party.active;
     if (wasParty && state.party.room) vsSend({ type: "party-leave", room: state.party.room });
     stopPartyAnimation();
+    clearPartyCountdown();
+    hidePartyPodium();
     state.party.active = false;
     state.daily.active = false;
     document.body.classList.remove("party-mode", "party-racing", "daily-mode");
@@ -618,6 +858,12 @@
   elements.partyCreate?.addEventListener("click", createParty);
   elements.partyJoin?.addEventListener("click", joinParty);
   elements.partyCopyRoom?.addEventListener("click", copyRoomCode);
+  elements.partyAddAi?.addEventListener("click", () => {
+    vsSend({ type: "party-ai-adjust", room: state.party.room, delta: 1 });
+  });
+  elements.partyRemoveAi?.addEventListener("click", () => {
+    vsSend({ type: "party-ai-adjust", room: state.party.room, delta: -1 });
+  });
   elements.partyRounds?.addEventListener("change", () => {
     state.party.rounds = Number(elements.partyRounds.value);
     if (state.party.room && partySelf()?.host && state.party.phase === "lobby") {
@@ -642,13 +888,32 @@
     vsSend({
       type: "party-next",
       room: state.party.room,
-      restart: state.party.round >= state.party.rounds
+      restart: true
     });
   });
-  elements.partySkip?.addEventListener("click", skipPartyRace);
   elements.partyLeave?.addEventListener("click", showMainMenu);
+  elements.closePartyPodium?.addEventListener("click", hidePartyPodium);
+  elements.partyPodium?.addEventListener("click", (event) => {
+    if (event.target === elements.partyPodium) hidePartyPodium();
+  });
+  elements.dailyCancel?.addEventListener("click", cancelDailyAttempt);
   elements.dailyModify?.addEventListener("click", modifyDailyMaze);
   elements.dailyBack?.addEventListener("click", showMainMenu);
+  elements.dailyPrevious?.addEventListener("click", () => {
+    if (state.daily.challenge?.day) loadDailyDay(shiftDailyDay(state.daily.challenge.day, -1));
+  });
+  elements.dailyNext?.addEventListener("click", () => {
+    if (state.daily.challenge?.day) loadDailyDay(shiftDailyDay(state.daily.challenge.day, 1));
+  });
+  elements.dailyToday?.addEventListener("click", () => loadDailyDay(state.daily.challenge?.today));
+  elements.dailyDate?.addEventListener("change", () => loadDailyDay(elements.dailyDate.value));
+  window.addEventListener("resize", () => {
+    partyAnimation?.items.forEach((item) => {
+      item.previewSized = false;
+      sizeMiniMaze(item);
+      drawMiniMaze(item);
+    });
+  });
 
   window.OutmazeOnline = Object.freeze({
     completeDailyAttempt,

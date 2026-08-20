@@ -8,7 +8,9 @@ const PROFILE_EMOJIS = Object.freeze([
   "🐸", "🐱", "🐶", "🦊", "🐼", "🐙", "🦄", "🐲",
   "⚡", "🔥", "🌙", "⭐", "🍀", "🍕", "🎯", "🧩"
 ]);
+// This namespace is part of every Daily seed. Never tie it to an app, rules, or AI release.
 const DAILY_VERSION = "daily-v1";
+const DAILY_ARCHIVE_DAYS = 30;
 
 function createServiceError(code, message, status = 400) {
   const error = new Error(message);
@@ -49,11 +51,27 @@ function publicProfile(profile) {
   };
 }
 
-function createMemoryStore() {
-  const profiles = new Map();
-  const names = new Map();
-  const dailyChallenges = new Map();
-  const dailyScores = new Map();
+function createMemoryStore(options = {}) {
+  const initial = options.initialData || {};
+  const profiles = new Map((initial.profiles || []).map((profile) => [profile.uid, { ...profile }]));
+  const names = new Map([...profiles.values()].map((profile) => [profile.nameKey || profileNameKey(profile.name), profile.uid]));
+  const dailyChallenges = new Map((initial.dailyChallenges || []).map(([day, challenge]) => [day, { ...challenge }]));
+  const dailyScores = new Map(
+    (initial.dailyScores || []).map(([day, scores]) => [
+      day,
+      new Map((scores || []).map((score) => [score.uid, { ...score }]))
+    ])
+  );
+
+  async function persist() {
+    if (!options.onChange) return;
+    await options.onChange({
+      schemaVersion: 1,
+      profiles: [...profiles.values()],
+      dailyChallenges: [...dailyChallenges.entries()],
+      dailyScores: [...dailyScores.entries()].map(([day, scores]) => [day, [...scores.values()]])
+    });
+  }
 
   return {
     kind: "memory",
@@ -78,6 +96,7 @@ function createMemoryStore() {
         updatedAt: Date.now()
       };
       profiles.set(uid, profile);
+      await persist();
       return profile;
     },
     async getDailyChallenge(day) {
@@ -87,6 +106,7 @@ function createMemoryStore() {
       const existing = dailyChallenges.get(day);
       if (existing) return existing;
       dailyChallenges.set(day, { ...challenge });
+      await persist();
       return challenge;
     },
     async saveDailyScore(day, uid, timeMs) {
@@ -103,6 +123,7 @@ function createMemoryStore() {
         updatedAt: Date.now()
       };
       scores.set(uid, next);
+      await persist();
       return next;
     },
     async getDailyScore(day, uid) {
@@ -117,6 +138,31 @@ function createMemoryStore() {
       );
     }
   };
+}
+
+function createLocalFileStore(filePath) {
+  const fs = require("fs");
+  const path = require("path");
+  let initialData = {};
+  try {
+    if (fs.existsSync(filePath)) initialData = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (error) {
+    console.warn(`Outmaze could not read local profile data: ${error.message}`);
+  }
+  let writeQueue = Promise.resolve();
+  const store = createMemoryStore({
+    initialData,
+    onChange(snapshot) {
+      const serialized = `${JSON.stringify(snapshot, null, 2)}\n`;
+      writeQueue = writeQueue.then(async () => {
+        await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+        await fs.promises.writeFile(filePath, serialized, "utf8");
+      });
+      return writeQueue;
+    }
+  });
+  store.kind = "local-file";
+  return store;
 }
 
 function createFirestoreStore(options = {}) {
@@ -267,7 +313,33 @@ function dailySeed(day) {
   return `outmaze-${DAILY_VERSION}-${day}`;
 }
 
-function makeAiSnapshot(round, seed) {
+function dailyDayTimestamp(day) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(day || ""))) return null;
+  const timestamp = Date.parse(`${day}T00:00:00Z`);
+  if (!Number.isFinite(timestamp) || utcDay(timestamp) !== day) return null;
+  return timestamp;
+}
+
+function shiftUtcDay(day, offset) {
+  return utcDay(dailyDayTimestamp(day) + Number(offset || 0) * 86400000);
+}
+
+function resolveDailyDay(requestedDay, today, archiveDays = DAILY_ARCHIVE_DAYS) {
+  const day = requestedDay == null || requestedDay === "" ? today : String(requestedDay);
+  const timestamp = dailyDayTimestamp(day);
+  if (timestamp == null) throw createServiceError("invalid-daily-day", "Choose a valid Daily Challenge date", 400);
+  const todayTimestamp = dailyDayTimestamp(today);
+  const archiveStart = shiftUtcDay(today, -(Math.max(1, archiveDays) - 1));
+  if (timestamp > todayTimestamp) {
+    throw createServiceError("daily-in-future", "That Daily Challenge has not begun yet", 400);
+  }
+  if (timestamp < dailyDayTimestamp(archiveStart)) {
+    throw createServiceError("daily-out-of-range", `Daily Challenges are available for the last ${archiveDays} days`, 400);
+  }
+  return { day, today, archiveStart };
+}
+
+function makeAiSnapshot(round, seed, salt = "daily-ai", overrides = {}) {
   return {
     seed,
     baseGrid: AICore.cloneGrid(round.baseGrid),
@@ -275,9 +347,89 @@ function makeAiSnapshot(round, seed) {
     coinBudget: round.coinBudget,
     singleBudget: round.singleBudget,
     specialTemplate: AICore.cloneSpecial(round.specialTemplate),
-    rngSeed: AICore.hashSeed(`${seed}:daily-ai`),
-    deterministicBudget: true
+    rngSeed: AICore.hashSeed(`${seed}:${salt}`),
+    deterministicBudget: true,
+    ...overrides
   };
+}
+
+function mazeSignature(layout) {
+  return `${layout.grid.map((row) => row.join("")).join("|")}:${layout.special?.cell?.x ?? "-"},${layout.special?.cell?.y ?? "-"}`;
+}
+
+function buildPartyAiMaze(seed, variant = 0, usedSignatures = new Set()) {
+  const round = AICore.createRound(seed);
+  const analysis = AICore.analyzePadOpportunities(round.baseGrid);
+  const recipes = [
+    {
+      name: "balanced",
+      run: (snapshot) => AICore.buildAiLayoutFromSnapshot({
+        ...snapshot,
+        padSpecialistLimit: 0,
+        padAwareRefinement: false,
+        aiSearchLimits: {
+          beamWidth: 3,
+          candidatesPerState: 9,
+          candidateBudget: 500,
+          finalistLimit: 8
+        }
+      })
+    },
+    ...[1, 2, 3, 4, 5].map((specialPlacementDepth) => ({
+      name: `hazard-depth-${specialPlacementDepth}`,
+      run: (snapshot) => AICore.buildRouteRolloutFromSnapshot(snapshot, {
+        deterministicBudget: true,
+        specialPlacementDepth,
+        relocateAtEnd: true
+      })
+    })),
+    {
+      name: "structure-weaver",
+      run: (snapshot) => AICore.buildMotifBeamRollout(snapshot, {
+        deterministicBudget: true,
+        mode: "route",
+        candidateLimit: 10,
+        beamWidth: 2,
+        motifWeight: 0.2
+      })
+    },
+    {
+      name: "diagonal-weaver",
+      run: (snapshot) => AICore.buildMotifBeamRollout(snapshot, {
+        deterministicBudget: true,
+        mode: "route",
+        candidateLimit: 10,
+        beamWidth: 2,
+        motifWeight: 0.9
+      })
+    },
+    ...analysis.modes.slice(0, 3).map((opportunity) => ({
+      name: `pad-${opportunity.mode}`,
+      run: (snapshot) => AICore.buildPadTacticalBeam(snapshot, {
+        deterministicBudget: true,
+        analysis,
+        mode: opportunity.mode,
+        candidateLimit: 8,
+        beamWidth: 2
+      })
+    }))
+  ];
+  let firstValid = null;
+  for (let offset = 0; offset < recipes.length; offset++) {
+    const recipeIndex = (Math.max(0, variant | 0) + offset) % recipes.length;
+    const recipe = recipes[recipeIndex];
+    const snapshot = makeAiSnapshot(round, seed, `party-ai:${variant}:${recipeIndex}`);
+    const layout = recipe.run(snapshot);
+    if (!layout?.grid || !layout?.special) continue;
+    const signature = mazeSignature(layout);
+    const candidate = { ...layout, signature, strategy: recipe.name };
+    if (!firstValid) firstValid = candidate;
+    if (!usedSignatures.has(signature)) return candidate;
+  }
+  if (firstValid) return firstValid;
+  const snapshot = makeAiSnapshot(round, seed, `party-ai:${variant}:fallback`);
+  const fallback = AICore.buildAiLayoutFromSnapshot(snapshot);
+  return { ...fallback, signature: mazeSignature(fallback), strategy: "balanced-fallback" };
 }
 
 function consumeWallCells(grid, baseGrid, cells, budget) {
@@ -403,11 +555,19 @@ function formatLeaderboard(rows) {
   }));
 }
 
-function createDailyService({ store, now = () => new Date(), aiBuilder = AICore.buildAiLayoutFromSnapshot } = {}) {
+function createDailyService({
+  store,
+  now = () => new Date(),
+  aiBuilder = AICore.buildAiLayoutFromSnapshot,
+  archiveDays = DAILY_ARCHIVE_DAYS
+} = {}) {
   const pending = new Map();
   async function challengeForDay(day = utcDay(now())) {
     const existing = await store.getDailyChallenge(day);
-    if (existing?.version === DAILY_VERSION && Number(existing.aiTime) > 0) return existing;
+    if (existing) {
+      if (existing.seed && Number(existing.aiTime) > 0) return existing;
+      throw createServiceError("daily-unavailable", "The saved Daily Challenge is incomplete", 503);
+    }
     if (pending.has(day)) return pending.get(day);
     const promise = Promise.resolve().then(async () => {
       const seed = dailySeed(day);
@@ -433,8 +593,9 @@ function createDailyService({ store, now = () => new Date(), aiBuilder = AICore.
   }
 
   return {
-    async get(uid = null) {
-      const challenge = await challengeForDay();
+    async get(uid = null, requestedDay = null) {
+      const range = resolveDailyDay(requestedDay, utcDay(now()), archiveDays);
+      const challenge = await challengeForDay(range.day);
       const [scores, own] = await Promise.all([
         store.getDailyScores(challenge.day, 100),
         uid ? store.getDailyScore(challenge.day, uid) : null
@@ -445,18 +606,21 @@ function createDailyService({ store, now = () => new Date(), aiBuilder = AICore.
         aiTime: Number(challenge.aiTime),
         version: challenge.version,
         rulesVersion: challenge.rulesVersion,
+        today: range.today,
+        archiveStart: range.archiveStart,
         leaderboard: formatLeaderboard(scores),
         personalBest: own ? Number(own.bestMs) / 1000 : null,
         attempts: Number(own?.attempts || 0)
       };
     },
     async submit(uid, payload) {
-      const challenge = await challengeForDay();
+      const range = resolveDailyDay(payload?.day, utcDay(now()), archiveDays);
+      const challenge = await challengeForDay(range.day);
       const validated = validateMazeForSeed(challenge.seed, payload);
       const time = simulateValidatedMaze(validated);
       const timeMs = Math.round(time * 1000);
       const saved = await store.saveDailyScore(challenge.day, uid, timeMs);
-      const result = await this.get(uid);
+      const result = await this.get(uid, challenge.day);
       const rank = result.leaderboard.find((row) => row.uid === uid)?.rank || null;
       return {
         ...result,
@@ -491,14 +655,18 @@ function scorePartyPlacements(entries) {
 
 module.exports = {
   AICore,
+  DAILY_ARCHIVE_DAYS,
   DAILY_VERSION,
   PROFILE_EMOJIS,
   createAuthService,
   createDailyService,
+  buildPartyAiMaze,
   createFirestoreStore,
+  createLocalFileStore,
   createMemoryStore,
   createServiceError,
   dailySeed,
+  makeAiSnapshot,
   normalizeDisplayName,
   normalizeEmoji,
   profileNameKey,
